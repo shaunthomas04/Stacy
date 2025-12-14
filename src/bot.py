@@ -2,6 +2,9 @@ import os
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
+from rag_functions import ask_stacy_llm
+import logging
+import asyncio
 
 # Load token from .env
 load_dotenv()
@@ -50,6 +53,20 @@ async def helpme(ctx):
         "`!rules` – Read company rules\n"
         "`!helpme` – List commands"
     )
+
+# command that gives user input to llm for output
+@bot.command(name="AskStacy")
+async def ask_stacy_command(ctx, *, question: str):
+    """
+    Discord command that sends the user's question to the LLM and replies with the answer.
+    """
+    try:
+        # Run the synchronous LLM function in a thread to avoid blocking the bot
+        stacy_response = await asyncio.to_thread(ask_stacy_llm, question)
+        await ctx.send(stacy_response)
+    except Exception as e:
+        logging.error(f"Error in ask_stacy_command: {e}")
+        await ctx.send("⚠️ Sorry, Stacy did not receive your message properly. Please try again.")
 
 # Run the bot
 bot.run(TOKEN)
