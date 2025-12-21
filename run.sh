@@ -1,22 +1,31 @@
 #!/bin/bash
 
-# Name of the model
-MODEL="qwen3:0.6b"
+MODEL="qwen2.5:7b"
+OLLAMA_URL="http://localhost:11434"
 
-# Check if Ollama model is running
-if pgrep -f "ollama run $MODEL" > /dev/null
-then
-    echo "✅ Ollama model $MODEL is already running."
-else
-    echo "⚡ Starting Ollama model $MODEL..."
-    # Start the Ollama model in the background
-    nohup ollama run $MODEL > ollama.log 2>&1 &
-    sleep 5  # wait a few seconds for the model to start
-fi
+echo "🔍 Checking Ollama server..."
+
+until curl -s "$OLLAMA_URL/api/tags" > /dev/null; do
+    echo "⏳ Waiting for Ollama server..."
+    sleep 2
+done
+
+echo "✅ Ollama server is up."
+
+echo "🔍 Checking model availability..."
+
+until curl -s -X POST "$OLLAMA_URL/api/generate" \
+    -H "Content-Type: application/json" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":\"ping\",\"stream\":false}" \
+    > /dev/null; do
+    echo "⏳ Waiting for model $MODEL to load..."
+    sleep 3
+done
+
+echo "✅ Model $MODEL is ready."
 
 # Activate virtual environment
 source .venv/bin/activate
 
-# Run the Discord bot
 echo "🚀 Starting Stacy bot..."
 python src/bot.py

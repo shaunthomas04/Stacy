@@ -63,10 +63,17 @@ async def ask_stacy_command(ctx, *, question: str):
     try:
         # Run the synchronous LLM function in a thread to avoid blocking the bot
         stacy_response = await asyncio.to_thread(ask_stacy_llm, question)
-        await ctx.send(stacy_response)
+
+        if not stacy_response or not stacy_response.strip():
+            stacy_response = (
+                "⚠️ Stacy is temporarily unavailable, but your message was received."
+            )
+
+        await ctx.send(stacy_response[:1900])
+        
     except Exception as e:
         logging.error(f"Error in ask_stacy_command: {e}")
-        await ctx.send("⚠️ Sorry, Stacy did not receive your message properly. Please try again.")
+        await ctx.send("⚠️ Sorry, Stacy did not receive your message properly. Please try again." + e)
 
 # Run the bot
 bot.run(TOKEN)
