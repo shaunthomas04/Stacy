@@ -2,7 +2,6 @@ import os
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
-from rag_functions import ask_stacy_llm
 import logging
 import asyncio
 
@@ -55,25 +54,25 @@ async def helpme(ctx):
     )
 
 # command that gives user input to llm for output
-@bot.command(name="AskStacy")
-async def ask_stacy_command(ctx, *, question: str):
-    """
-    Discord command that sends the user's question to the LLM and replies with the answer.
-    """
-    try:
-        # Run the synchronous LLM function in a thread to avoid blocking the bot
-        stacy_response = await asyncio.to_thread(ask_stacy_llm, question)
+# @bot.command(name="AskStacy")
+# async def ask_stacy_command(ctx, *, question: str):
+#     """
+#     Discord command that sends the user's question to the LLM and replies with the answer.
+#     """
+#     try:
+#         # Run the synchronous LLM function in a thread to avoid blocking the bot
+#         stacy_response = await asyncio.to_thread(ask_stacy_llm, question)
 
-        if not stacy_response or not stacy_response.strip():
-            stacy_response = (
-                "⚠️ Stacy is temporarily unavailable, but your message was received."
-            )
+#         if not stacy_response or not stacy_response.strip():
+#             stacy_response = (
+#                 "⚠️ Stacy is temporarily unavailable, but your message was received."
+#             )
 
-        await ctx.send(stacy_response[:1900])
+#         await ctx.send(stacy_response[:1900])
         
-    except Exception as e:
-        logging.error(f"Error in ask_stacy_command: {e}")
-        await ctx.send("⚠️ Sorry, Stacy did not receive your message properly. Please try again." + e)
+#     except Exception as e:
+#         logging.error(f"Error in ask_stacy_command: {e}")
+#         await ctx.send("⚠️ Sorry, Stacy did not receive your message properly. Please try again." + e)
 
 # Run the bot
 bot.run(TOKEN)

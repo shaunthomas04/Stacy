@@ -12,7 +12,7 @@ if not os.getenv("OPENAI_API_KEY"):
 
 # 2. INITIALIZE LLM ONCE (Global)
 # # Using gpt-4o-mini for speed and cost-efficiency
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, timeout=10, max_retries=2)
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, timeout=10, max_retries=2)
 
 
 # 5. NODES
@@ -43,9 +43,18 @@ def stacy_router(state: StacyState):
         return "ignore" # Default to ignore so the script keeps running
 
 def hr_node(state: StacyState):
-    """Handles HR-related inquiries."""
-    result = lookup_hr_policy.invoke({"user_question": state["messages"][-1].content})
-    return {"messages": [HumanMessage(content=f"HR Info: {result}", name="Stacy")]}
+    policy_text = lookup_hr_policy.invoke({"user_question": state["messages"][-1].content})
+    
+    # Let the LLM "be" Stacy
+    prompt = [
+        SystemMessage(content="You are Stacy, a helpful but slightly sassy HR bot. "
+                              "Explain this policy to the user in a friendly way."),
+        state["messages"][-1], # The user's question
+        HumanMessage(content=f"Context from HR Handbook: {policy_text}")
+    ]
+    
+    response = llm.invoke(prompt)
+    return {"messages": [response]}
 
 def report_node(state: StacyState):
     """Determines how serious a violation is."""
@@ -73,15 +82,14 @@ def apply_infraction_node(state: StacyState):
         tool_result = upload_severe_infraction.invoke({"user_id": uid})
 
     # 2. Craft the public-facing Bot response
-    bot_response = (
-        f"🚨 **HR MONITOR ACTION** 🚨\n"
-        f"User: @{uid}\n"
-        f"Violation: Your recent message contains prohibited content.\n"
-        f"Action: Stacy has {action_taken}.\n"
-        f"Details: {tool_result}"
+    infraction_prompt = (
+        f"You are Stacy, a strict but professional HR bot. You just {action_taken} "
+        f"against @{uid}. Tell them what happened, why it's bad, and use a "
+        f"{'gentle' if sev == 'warning' else 'stern'} tone. Include emojis."
     )
-        
-    return {"messages": [HumanMessage(content=bot_response, name="Stacy")]}
+
+    response = llm.invoke([SystemMessage(content=infraction_prompt)] + state["messages"])
+    return {"messages": [response]}
 
 def silent_ignore_node(state: StacyState):
     """Explicit node for the 'Stacy Ignore' path to prevent graph hanging."""
