@@ -4,3 +4,4 @@ langchain
 langchain-ollama
 langchain-openai
 langgraph
+mysql-connector-python
