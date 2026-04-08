@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage
 # Import the compiled graph from your agent file
 from stacy_graph import app
 from database_functions import upsert_user, initialize_guild
+from misc import generate_hr_report
 
 # Load token from .env
 load_dotenv()
@@ -151,6 +152,27 @@ async def helpme(ctx):
         "Example: `@Stacy @BadActor42 just used a slur in general`"
     )
 
+@bot.command(name="History")
+async def hr_report(ctx, member: discord.Member = None):
+    """
+    Usage: !History @user
+    Generates and sends an HTML HR report for the mentioned user.
+    """
+    target = member or ctx.author  # defaults to self if no mention
+    guild_id = str(ctx.guild.id)
+    user_id = str(target.id)
+
+    async with ctx.typing():
+        filepath = await asyncio.to_thread(generate_hr_report, user_id, guild_id)
+
+    if not filepath:
+        await ctx.send(f"❌ No record found for {target.display_name} in this server.")
+        return
+
+    await ctx.send(
+        f"📋 **HR Report for @{target.display_name}**",
+        file=discord.File(filepath, filename=f"HR_Report_{target.display_name}.html")
+    )
 
 # ------------------
 # Run
