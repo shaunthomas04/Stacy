@@ -1,21 +1,30 @@
 import os
+import json
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
-from stacy_graph_tools import StacyState, lookup_hr_policy, determine_severity, warn_user, upload_minor_infraction, upload_severe_infraction
+from stacy_graph_tools import StacyState, lookup_hr_policy, warn_user, upload_minor_infraction, upload_severe_infraction
+from database_functions import upsert_user
 
 # 1. LOAD ENVIRONMENT
-load_dotenv() 
+load_dotenv()
 if not os.getenv("OPENAI_API_KEY"):
     print("Warning: OPENAI_API_KEY not found in .env file")
 
 # 2. INITIALIZE LLM ONCE (Global)
-# # Using gpt-4o-mini for speed and cost-efficiency
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, timeout=10, max_retries=2)
 
 
-# 5. NODES
+# 3. SEVERITY → DB ENUM MAP
+SEVERITY_MAP = {
+    "warning": "Low",
+    "minor":   "Medium",
+    "severe":  "Critical"
+}
+
+
+# 4. NODES
 
 def stacy_router(state: StacyState):
     system_prompt = (
@@ -25,87 +34,134 @@ def stacy_router(state: StacyState):
         "If the user is reporting bad behavior or being abusive, use 'report_violation'.\n"
         "Otherwise, use 'ignore'."
     )
-    
+
     try:
         response = llm.invoke([SystemMessage(content=system_prompt)] + state["messages"])
         content = response.content.lower().strip()
-        
-        # Exact matching to prevent logic slips
+
         if "hr_question" in content:
             return "hr_question"
         elif "report" in content or "violation" in content or "slur" in content:
             return "report_violation"
         else:
             return "ignore"
-            
+
     except Exception as e:
         print(f"!!! Stacy Router Error (Timeout or API Issue): {e}")
-        return "ignore" # Default to ignore so the script keeps running
+        return "ignore"
+
 
 def hr_node(state: StacyState):
     policy_text = lookup_hr_policy.invoke({"user_question": state["messages"][-1].content})
-    
-    # Let the LLM "be" Stacy
+
     prompt = [
         SystemMessage(content="You are Stacy, a helpful but slightly sassy HR bot. "
                               "Explain this policy to the user in a friendly way."),
-        state["messages"][-1], # The user's question
+        state["messages"][-1],
         HumanMessage(content=f"Context from HR Handbook: {policy_text}")
     ]
-    
+
     response = llm.invoke(prompt)
     return {"messages": [response]}
 
+
 def report_node(state: StacyState):
-    """Determines how serious a violation is."""
-    severity = determine_severity.invoke(state["messages"][-1].content)
-    return {"severity": severity}
+    """Uses the LLM to determine severity, points, AND who the actual offender is."""
+    last_msg = state["messages"][-1].content
+
+    system_prompt = """You are Stacy, an HR enforcement bot. Analyze this message and return ONLY a JSON object.
+
+    If someone is REPORTING another user, extract their username from the message.
+    If the user is violating policy THEMSELVES, set reported_user to null.
+
+    Return ONLY a JSON object in this exact format:
+    {"severity": "warning", "points": 0, "reported_user": null}
+
+    Rules:
+    - "warning" (0 points): Mild rudeness, first-time tone issues, borderline language
+    - "minor" (1-3 points): Clear policy violations, repeated rudeness, low-grade slurs
+    - "severe" (4-10 points): Hate speech, slurs, harassment, threats, serious misconduct
+
+    Scale points within each tier based on how bad the message is. Return ONLY the JSON, no explanation."""
+
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"Message to evaluate: {last_msg}")
+    ])
+
+    try:
+        clean = response.content.strip().strip("```json").strip("```").strip()
+        result = json.loads(clean)
+        severity = result.get("severity", "warning")
+        points = int(result.get("points", 0))
+        # If reporting someone else, target them — otherwise target the sender
+        reported_user = result.get("reported_user")
+        if not reported_user or reported_user == "null":
+            reported_user = state.get("user_id", "UnknownUser")
+
+
+
+    except (json.JSONDecodeError, ValueError):
+        severity = "warning"
+        points = 0
+        reported_user = state.get("user_id", "UnknownUser")
+
+    return {"severity": severity, "points": points, "target_user_id": reported_user}
+
 
 def apply_infraction_node(state: StacyState):
-    """
-    Applies the consequence and sends a formal bot response 
-    to the user about their violation.
-    """
     sev = state.get("severity", "warning")
-    uid = state.get("user_id", "UnknownUser")
+    uid = state.get("user_id", "UnknownUser")           # who sent the message
+    target = state.get("target_user_id", uid)           # who actually gets the infraction
+    gid = state.get("guild_id", "UnknownGuild")
+    pts = state.get("points", 0)
     last_msg = state["messages"][-1].content
-    
-    # 1. Execute the internal tool/DB upload
-    if sev == "warning":
-        action_taken = "issued a formal warning"
-        tool_result = warn_user.invoke(last_msg)
-    elif sev == "minor":
-        action_taken = "recorded a Minor Infraction (1 point)"
-        tool_result = upload_minor_infraction.invoke({"user_id": uid})
-    else:
-        action_taken = "recorded a Severe Infraction (5 points) and opened a forum investigation"
-        tool_result = upload_severe_infraction.invoke({"user_id": uid})
 
-    # 2. Craft the public-facing Bot response
+    # Auto-register both users before any DB write
+    upsert_user(target, gid, target)
+    upsert_user(uid, gid, uid)
+
+    if sev == "warning":
+        action_taken = "issued a formal warning (0 points)"
+        tool_result = warn_user.invoke({
+            "user_id": target, "guild_id": gid, "message": last_msg
+        })
+    elif sev == "minor":
+        action_taken = f"recorded a Minor Infraction ({pts} points)"
+        tool_result = upload_minor_infraction.invoke({
+            "user_id": target, "guild_id": gid, "message": last_msg, "points": pts
+        })
+    else:
+        action_taken = f"recorded a Severe Infraction ({pts} points) and opened a forum investigation"
+        tool_result = upload_severe_infraction.invoke({
+            "user_id": target, "guild_id": gid, "message": last_msg, "points": pts
+        })
+
     infraction_prompt = (
         f"You are Stacy, a strict but professional HR bot. You just {action_taken} "
-        f"against @{uid}. Tell them what happened, why it's bad, and use a "
-        f"{'gentle' if sev == 'warning' else 'stern'} tone. Include emojis."
+        f"against @{target}. Tell @{uid} (who {'reported this' if target != uid else 'did this'}) "
+        f"what happened and that {pts} points were added to @{target}'s record. "
+        f"Use a {'gentle' if sev == 'warning' else 'stern'} tone. Include emojis."
     )
 
     response = llm.invoke([SystemMessage(content=infraction_prompt)] + state["messages"])
     return {"messages": [response]}
 
+
 def silent_ignore_node(state: StacyState):
     """Explicit node for the 'Stacy Ignore' path to prevent graph hanging."""
     return {"messages": [HumanMessage(content="[Stacy has no response for this message]", name="Stacy")]}
 
-# 6. GRAPH CONSTRUCTION
+
+# 5. GRAPH CONSTRUCTION
 
 workflow = StateGraph(StacyState)
 
-# Add functional nodes
 workflow.add_node("process_hr", hr_node)
 workflow.add_node("process_report", report_node)
 workflow.add_node("apply_infraction", apply_infraction_node)
 workflow.add_node("silent_ignore", silent_ignore_node)
 
-# START logic with Conditional Branching
 workflow.add_conditional_edges(
     START,
     stacy_router,
@@ -116,42 +172,44 @@ workflow.add_conditional_edges(
     }
 )
 
-# Infraction sequence
 workflow.add_edge("process_report", "apply_infraction")
-
-# All nodes converge to END
 workflow.add_edge("process_hr", END)
 workflow.add_edge("apply_infraction", END)
 workflow.add_edge("silent_ignore", END)
 
-# Compile the application
 app = workflow.compile()
+
 
 if __name__ == "__main__":
     test_scenarios = [
         {
             "name": "Scenario 1: Policy Inquiry (HR Flow)",
             "user_id": "shaun_dev",
+            "guild_id": "1234567890",
             "message": "Hey Stacy, what is the official policy for leaving the office early on Fridays?"
         },
         {
             "name": "Scenario 2: Reporting Someone Else (Third-Party Report)",
             "user_id": "manager_tom",
+            "guild_id": "1234567890",
             "message": "I need to report a violation: User 'BadActor42' just used a racial slur in the general chat."
         },
         {
             "name": "Scenario 3: Self-Violation (Direct Write-up)",
             "user_id": "troll_user",
+            "guild_id": "1234567890",
             "message": "I don't care about the rules, you are all total [slur]!"
         },
         {
             "name": "Scenario 4: Intentional Ignore (Noise Filter)",
             "user_id": "shaun_dev",
+            "guild_id": "1234567890",
             "message": "Does anyone know if the breakroom has more oat milk? Also the weather is great."
         },
         {
             "name": "Scenario 5: Ambiguous/Edge Case (Stress Test)",
             "user_id": "confused_emp",
+            "guild_id": "1234567890",
             "message": "I'm worried that my leave request looks like a violation of policy, can you check?"
         }
     ]
@@ -164,18 +222,19 @@ if __name__ == "__main__":
         print("-" * 20)
 
         inputs = {
-            "messages": [HumanMessage(content=scenario['message'])], 
-            "user_id": scenario['user_id']
+            "messages": [HumanMessage(content=scenario['message'])],
+            "user_id": scenario['user_id'],
+            "guild_id": scenario['guild_id']
         }
 
-        # Stream the graph execution
         for output in app.stream(inputs):
             for node_name, data in output.items():
                 if "messages" in data:
-                    # Get the last message content
                     content = data['messages'][-1].content
                     print(f"[{node_name}] -> {content}")
                 elif "severity" in data:
-                    print(f"[{node_name}] -> Severity Determined: {data['severity'].upper()}")
-        
+                    target = data.get("target_user_id", "unknown")
+                    print(f"[{node_name}] -> Severity: {data['severity'].upper()} | "
+                          f"Points: {data.get('points', 0)} | Target: @{target}")
+
         print("="*40)

@@ -3,12 +3,15 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 from langgraph.graph import add_messages
+from database_functions import log_stacy_inference, upsert_user, get_connection
 
 # 3. STATE DEFINITION
 class StacyState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     user_id: str
+    guild_id: str       # ← ADD THIS — your DB needs it for every operation
     severity: str
+    points: int
 
 # 4. TOOLS
 @tool
@@ -19,20 +22,43 @@ def lookup_hr_policy(user_question: str) -> str:
 @tool
 def determine_severity(user_complaint: str) -> str:
     """Analyze a user's speech/message to determine the severity of a violation."""
-    # Logic can be expanded here, but for now, we simulate the logic from your diagram
     return random.choice(["warning", "minor", "severe"])
 
 @tool
-def warn_user(message_context: str) -> str:
-    """Draft a custom formal warning for a policy violation."""
-    return f"Formal Warning Issued: Your message '{message_context}' violates policy."
+def warn_user(user_id: str, guild_id: str, message: str) -> str:
+    """Log a formal warning to the database (0 points, but still on record)."""
+    log_stacy_inference(
+        user_id=user_id,
+        guild_id=guild_id,
+        message=message,
+        inference="Formal warning issued by Stacy.",
+        severity="Low",      
+        penalty=0
+    )
+    return f"Warning logged for {user_id}. No points added, but it's on record."
 
 @tool
-def upload_minor_infraction(user_id: str, points: int = 1) -> str:
-    """Upload small infraction points to the database."""
-    return f"DB Update: {points} point added to {user_id}."
+def upload_minor_infraction(user_id: str, guild_id: str, message: str, points: int) -> str:
+    """Upload a minor infraction with LLM-determined points to the database."""
+    log_stacy_inference(
+        user_id=user_id,
+        guild_id=guild_id,
+        message=message,
+        inference="Minor policy violation flagged by Stacy.",
+        severity="Medium", 
+        penalty=points
+    )
+    return f"DB Update: {points} points added to {user_id}."
 
 @tool
-def upload_severe_infraction(user_id: str, points: int = 5) -> str:
-    """Upload severe points and create a community forum discussion post."""
+def upload_severe_infraction(user_id: str, guild_id: str, message: str, points: int) -> str:
+    """Upload a severe infraction with LLM-determined points to the database."""
+    log_stacy_inference(
+        user_id=user_id,
+        guild_id=guild_id,
+        message=message,
+        inference="Severe violation flagged by Stacy. Forum thread opened.",
+        severity="Critical",  
+        penalty=points
+    )
     return f"DB Update: {points} points added to {user_id}. Forum thread created."
