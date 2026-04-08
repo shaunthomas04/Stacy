@@ -9,7 +9,8 @@ from database_functions import log_stacy_inference, upsert_user, get_connection
 class StacyState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     user_id: str
-    guild_id: str       # ← ADD THIS — your DB needs it for every operation
+    guild_id: str
+    target_user_id: str 
     severity: str
     points: int
 

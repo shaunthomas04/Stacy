@@ -66,23 +66,18 @@ def hr_node(state: StacyState):
 
 
 def report_node(state: StacyState):
-    """Uses the LLM to determine severity, points, AND who the actual offender is."""
     last_msg = state["messages"][-1].content
 
     system_prompt = """You are Stacy, an HR enforcement bot. Analyze this message and return ONLY a JSON object.
 
-    If someone is REPORTING another user, extract their username from the message.
-    If the user is violating policy THEMSELVES, set reported_user to null.
-
-    Return ONLY a JSON object in this exact format:
-    {"severity": "warning", "points": 0, "reported_user": null}
+    {"severity": "warning", "points": 0}
 
     Rules:
-    - "warning" (0 points): Mild rudeness, first-time tone issues, borderline language
-    - "minor" (1-3 points): Clear policy violations, repeated rudeness, low-grade slurs
-    - "severe" (4-10 points): Hate speech, slurs, harassment, threats, serious misconduct
+    - "warning" (0 points): Mild rudeness, borderline language
+    - "minor" (1-3 points): Clear policy violations, repeated rudeness
+    - "severe" (4-10 points): Hate speech, slurs, harassment, threats
 
-    Scale points within each tier based on how bad the message is. Return ONLY the JSON, no explanation."""
+    Return ONLY the JSON, no explanation."""
 
     response = llm.invoke([
         SystemMessage(content=system_prompt),
@@ -94,19 +89,12 @@ def report_node(state: StacyState):
         result = json.loads(clean)
         severity = result.get("severity", "warning")
         points = int(result.get("points", 0))
-        # If reporting someone else, target them — otherwise target the sender
-        reported_user = result.get("reported_user")
-        if not reported_user or reported_user == "null":
-            reported_user = state.get("user_id", "UnknownUser")
-
-
-
     except (json.JSONDecodeError, ValueError):
         severity = "warning"
         points = 0
-        reported_user = state.get("user_id", "UnknownUser")
 
-    return {"severity": severity, "points": points, "target_user_id": reported_user}
+    return {"severity": severity, "points": points}
+    # target_user_id already in state — no need to touch it
 
 
 def apply_infraction_node(state: StacyState):
@@ -186,30 +174,35 @@ if __name__ == "__main__":
             "name": "Scenario 1: Policy Inquiry (HR Flow)",
             "user_id": "shaun_dev",
             "guild_id": "1234567890",
+            "target_user_id": "shaun_dev",  # self, no violation
             "message": "Hey Stacy, what is the official policy for leaving the office early on Fridays?"
         },
         {
             "name": "Scenario 2: Reporting Someone Else (Third-Party Report)",
             "user_id": "manager_tom",
             "guild_id": "1234567890",
+            "target_user_id": "BadActor42",  # explicitly the offender
             "message": "I need to report a violation: User 'BadActor42' just used a racial slur in the general chat."
         },
         {
             "name": "Scenario 3: Self-Violation (Direct Write-up)",
             "user_id": "troll_user",
             "guild_id": "1234567890",
+            "target_user_id": "troll_user",  # they did it themselves
             "message": "I don't care about the rules, you are all total [slur]!"
         },
         {
             "name": "Scenario 4: Intentional Ignore (Noise Filter)",
             "user_id": "shaun_dev",
             "guild_id": "1234567890",
+            "target_user_id": "shaun_dev",
             "message": "Does anyone know if the breakroom has more oat milk? Also the weather is great."
         },
         {
             "name": "Scenario 5: Ambiguous/Edge Case (Stress Test)",
             "user_id": "confused_emp",
             "guild_id": "1234567890",
+            "target_user_id": "confused_emp",
             "message": "I'm worried that my leave request looks like a violation of policy, can you check?"
         }
     ]
@@ -224,7 +217,8 @@ if __name__ == "__main__":
         inputs = {
             "messages": [HumanMessage(content=scenario['message'])],
             "user_id": scenario['user_id'],
-            "guild_id": scenario['guild_id']
+            "guild_id": scenario['guild_id'],
+            "target_user_id": scenario['target_user_id']  # ← just pass it straight in
         }
 
         for output in app.stream(inputs):

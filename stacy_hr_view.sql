@@ -1,3 +1,5 @@
+USE stacy_hr_db;
+
 SELECT * FROM users;
 
 -- 1. See all Servers and their HR Constitutions
