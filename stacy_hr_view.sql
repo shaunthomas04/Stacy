@@ -3,7 +3,7 @@ USE stacy_hr_db;
 SELECT * FROM users;
 
 -- 1. See all Servers and their HR Constitutions
--- SELECT * FROM guilds;
+SELECT * FROM guilds;
 
 -- 2. See the 'Most Wanted' (Users with the highest social debt across all servers)
 -- SELECT 
