@@ -3,7 +3,7 @@ from datetime import datetime
 import tempfile
 import os
 
-def generate_hr_report(user_id: str, guild_id: str) -> str | None:
+def generate_hr_report(user_id: str, guild_id: str, reports_dir: str) -> str | None:
     """
     Generates a styled HTML HR report for a given user.
     Returns the file path of the saved report, or None if user not found.
@@ -411,10 +411,8 @@ def generate_hr_report(user_id: str, guild_id: str) -> str | None:
     </html>"""
 
     # Save to a temp file
-    filename = os.path.join(
-        tempfile.gettempdir(),
-        f"hr_report_{user_id}_{guild_id}.html"
-    )
+    filename = os.path.join(reports_dir, f"hr_report_{user_id}_{guild_id}.html")
+
     with open(filename, "w", encoding="utf-8") as f:
         f.write(html)
 

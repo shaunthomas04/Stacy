@@ -1,26 +1,73 @@
 import os
 import asyncio
 import logging
+import threading
+import base64
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
 from langchain_core.messages import HumanMessage
+from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+from pyngrok import ngrok
+import uvicorn
 
 # Import the compiled graph from your agent file
 from stacy_graph import app
 from database_functions import upsert_user, initialize_guild
-from misc import generate_hr_report
+from report import generate_hr_report
 
 # Load token from .env
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
+ngrok.set_auth_token(os.getenv("NGROK_AUTHTOKEN"))
 
 logging.basicConfig(level=logging.INFO)
 
-# Intents (required to read messages)
+# ------------------
+# Reports Directory
+# ------------------
+
+REPORTS_DIR = os.path.join(os.path.dirname(__file__), "temp")
+os.makedirs(REPORTS_DIR, exist_ok=True)
+
+
+# ------------------
+# FastAPI Server
+# ------------------
+
+api = FastAPI()
+
+@api.get("/report/{guild_id}/{user_id}")
+async def serve_report(guild_id: str, user_id: str):
+    filepath = os.path.join(REPORTS_DIR, f"hr_report_{user_id}_{guild_id}.html")
+    if not os.path.exists(filepath):
+        return HTMLResponse(
+            "<h1 style='font-family:monospace;color:#e11d48'>Report not found.</h1>",
+            status_code=404
+        )
+    with open(filepath, "r", encoding="utf-8") as f:
+        content = f.read()
+    return HTMLResponse(
+        content=content,
+        headers={"ngrok-skip-browser-warning": "true"}
+    )
+
+def start_api():
+    uvicorn.run(api, host="0.0.0.0", port=5000, log_level="warning")
+
+# Start FastAPI in background thread and open ngrok tunnel
+threading.Thread(target=start_api, daemon=True).start()
+PUBLIC_URL = ngrok.connect(5000).public_url
+print(f"\n✅ Report server live at: {PUBLIC_URL}\n")
+
+
+# ------------------
+# Discord Bot
+# ------------------
+
 intents = discord.Intents.default()
 intents.message_content = True
-
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -28,16 +75,25 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 # Helpers
 # ------------------
 
-async def run_stacy(user_id: str, guild_id: str, target_user_id: str, message_content: str) -> str | None:
+async def run_stacy(
+    user_id: str,
+    guild_id: str,
+    target_user_id: str,
+    message_content: str,
+    image_b64: str = "",
+    image_mime: str = "",
+) -> str | None:
     """
     Runs the Stacy LangGraph agent and returns the final response string, or None if ignored.
     Wrapped in asyncio.to_thread since LangGraph is synchronous.
     """
     inputs = {
-        "messages": [HumanMessage(content=message_content)],
+        "messages": [HumanMessage(content=message_content or "[image only]")],
         "user_id": user_id,
         "guild_id": guild_id,
         "target_user_id": target_user_id,
+        "image_b64": image_b64,
+        "image_mime": image_mime,
     }
 
     def _run():
@@ -64,24 +120,37 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Never respond to bots (including herself)
     if message.author.bot:
         return
 
-    # Always process commands first (!, etc.)
     await bot.process_commands(message)
 
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
-    # Auto-register the guild if it does not exist yet
-    hr_policy = "Welcome to the server. We expect all members to treat each other with basic respect at all times. Harassment, hate speech, slurs, and targeted abuse of any kind will result in immediate action. Keep discussions civil, avoid spamming, and do not share inappropriate or NSFW content outside of designated channels. Repeated or severe violations will be escalated and may result in removal from the server. Stacy is always watching."
+
+    hr_policy = (
+        "Welcome to the server. We expect all members to treat each other with basic respect at all times. "
+        "Harassment, hate speech, slurs, and targeted abuse of any kind will result in immediate action. "
+        "Keep discussions civil, avoid spamming, and do not share inappropriate or NSFW content outside of "
+        "designated channels. Repeated or severe violations will be escalated and may result in removal from "
+        "the server. Stacy is always watching. 👀"
+    )
     initialize_guild(guild_id, message.guild.name, hr_policy)
+
+    # Check for image attachments
+    image_b64 = ""
+    image_mime = ""
+    for attachment in message.attachments:
+        if attachment.content_type and attachment.content_type.startswith("image/"):
+            image_bytes = await attachment.read()
+            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+            image_mime = attachment.content_type
+            break  # just handle the first image
 
     is_stacy_mentioned = bot.user in message.mentions
 
     if is_stacy_mentioned:
         # --- Flow 1: Manual report or HR question via @Stacy ---
-        # Filter out Stacy herself from the mention list
         other_mentions = [m for m in message.mentions if m != bot.user]
 
         if other_mentions:
@@ -94,24 +163,27 @@ async def on_message(message):
             target_user_id = user_id
             target_username = message.author.display_name
 
-        # Ensure both users exist in DB before graph runs
         upsert_user(user_id, guild_id, message.author.display_name)
         if target_user_id != user_id:
             upsert_user(target_user_id, guild_id, target_username)
 
         async with message.channel.typing():
-            response = await run_stacy(user_id, guild_id, target_user_id, message.content)
+            response = await run_stacy(
+                user_id, guild_id, target_user_id,
+                message.content, image_b64, image_mime
+            )
 
         if response:
-            await message.reply(response[:1990])  # Discord 2000 char limit
+            await message.reply(response[:1990])
 
     else:
         # --- Flow 2: Passive monitoring — Stacy watches everyone ---
-        # Ensure the author exists in DB
         upsert_user(user_id, guild_id, message.author.display_name)
 
-        # Run silently — only acts if router flags a violation
-        response = await run_stacy(user_id, guild_id, user_id, message.content)
+        response = await run_stacy(
+            user_id, guild_id, user_id,
+            message.content, image_b64, image_mime
+        )
 
         if response:
             await message.reply(response[:1990])
@@ -125,9 +197,11 @@ async def on_message(message):
 async def ping(ctx):
     await ctx.send("🏓 Pong!")
 
+
 @bot.command()
 async def hello(ctx):
     await ctx.send(f"Hello {ctx.author.mention}, HR acknowledges your presence. 👔")
+
 
 @bot.command()
 async def rules(ctx):
@@ -139,6 +213,7 @@ async def rules(ctx):
         "To report a user: `@Stacy @offender your reason here`"
     )
 
+
 @bot.command()
 async def helpme(ctx):
     await ctx.send(
@@ -146,33 +221,34 @@ async def helpme(ctx):
         "`!ping` – Test the bot\n"
         "`!hello` – Greet HR\n"
         "`!rules` – Read company rules\n"
-        "`!helpme` – List commands\n\n"
+        "`!helpme` – List commands\n"
+        "`!History @user` – View a user's HR report\n\n"
         "**Reporting a user:**\n"
         "Mention `@Stacy` and then `@username` in the same message.\n"
         "Example: `@Stacy @BadActor42 just used a slur in general`"
     )
 
+
 @bot.command(name="History")
 async def hr_report(ctx, member: discord.Member = None):
     """
     Usage: !History @user
-    Generates and sends an HTML HR report for the mentioned user.
+    Generates an HTML HR report and sends a clickable hyperlink.
     """
-    target = member or ctx.author  # defaults to self if no mention
+    target = member or ctx.author
     guild_id = str(ctx.guild.id)
     user_id = str(target.id)
 
     async with ctx.typing():
-        filepath = await asyncio.to_thread(generate_hr_report, user_id, guild_id)
+        filepath = await asyncio.to_thread(generate_hr_report, user_id, guild_id, REPORTS_DIR)
 
     if not filepath:
         await ctx.send(f"❌ No record found for {target.display_name} in this server.")
         return
 
-    await ctx.send(
-        f"📋 **HR Report for @{target.display_name}**",
-        file=discord.File(filepath, filename=f"HR_Report_{target.display_name}.html")
-    )
+    url = f"{PUBLIC_URL}/report/{guild_id}/{user_id}"
+    await ctx.send(f"[{target.display_name}'s HR History]({url})")
+
 
 # ------------------
 # Run
