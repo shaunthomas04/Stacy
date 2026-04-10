@@ -11,11 +11,13 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 from pyngrok import ngrok
 import uvicorn
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Import the compiled graph from your agent file
 from stacy_graph import app
-from database_functions import upsert_user, initialize_guild
+from database_functions import upsert_user, initialize_guild, get_user_score
 from report import generate_hr_report
+from social_credit import sync_all_roles, setup_and_assign_hr_role
 
 # Load token from .env
 load_dotenv()
@@ -67,8 +69,24 @@ print(f"\n✅ Report server live at: {PUBLIC_URL}\n")
 # ------------------
 
 intents = discord.Intents.default()
+intents.members = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+# ------------------
+# Cron Job
+# ------------------
+
+async def role_sync_job():
+    """Runs every 5 minutes — syncs HR roles for all members in all guilds."""
+    print("⏰ Cron: Starting scheduled role sync...")
+    for guild in bot.guilds:
+        try:
+            await sync_all_roles(guild)
+        except Exception as e:
+            print(f"❌ Cron error for guild {guild.name}: {e}")
+    print("⏰ Cron: Role sync complete.")
 
 
 # ------------------
@@ -117,6 +135,15 @@ async def on_ready():
     print(f"✅ Stacy is online as {bot.user}")
     print(f"   Monitoring {len(bot.guilds)} server(s)")
 
+    # Start the scheduler once the bot is ready and the event loop is running
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(role_sync_job, "interval", minutes=5)
+    scheduler.start()
+    print("⏰ Role sync scheduler started — running every 5 minutes")
+
+    # Run an immediate sync on startup so roles are correct right away
+    await role_sync_job()
+
 
 @bot.event
 async def on_message(message):
@@ -145,21 +172,18 @@ async def on_message(message):
             image_bytes = await attachment.read()
             image_b64 = base64.b64encode(image_bytes).decode("utf-8")
             image_mime = attachment.content_type
-            break  # just handle the first image
+            break
 
     is_stacy_mentioned = bot.user in message.mentions
 
     if is_stacy_mentioned:
-        # --- Flow 1: Manual report or HR question via @Stacy ---
         other_mentions = [m for m in message.mentions if m != bot.user]
 
         if other_mentions:
-            # @Stacy @BadActor42 this guy used a slur
             target = other_mentions[0]
             target_user_id = str(target.id)
             target_username = target.display_name
         else:
-            # @Stacy what's the leave policy?
             target_user_id = user_id
             target_username = message.author.display_name
 
@@ -176,8 +200,16 @@ async def on_message(message):
         if response:
             await message.reply(response[:1990])
 
+            # Immediately update the target's role after an infraction
+            try:
+                score = get_user_score(target_user_id, guild_id)
+                target_member = message.guild.get_member(int(target_user_id))
+                if target_member:
+                    await setup_and_assign_hr_role(message.guild, target_member, score)
+            except Exception as e:
+                print(f"❌ Role update failed after infraction: {e}")
+
     else:
-        # --- Flow 2: Passive monitoring — Stacy watches everyone ---
         upsert_user(user_id, guild_id, message.author.display_name)
 
         response = await run_stacy(
@@ -187,6 +219,13 @@ async def on_message(message):
 
         if response:
             await message.reply(response[:1990])
+
+            # Immediately update the sender's role after a self-violation
+            try:
+                score = get_user_score(user_id, guild_id)
+                await setup_and_assign_hr_role(message.guild, message.author, score)
+            except Exception as e:
+                print(f"❌ Role update failed after self-violation: {e}")
 
 
 # ------------------
@@ -247,7 +286,7 @@ async def hr_report(ctx, member: discord.Member = None):
         return
 
     url = f"{PUBLIC_URL}/report/{guild_id}/{user_id}"
-    await ctx.send(f"[{target.display_name}'s HR History]({url})")
+    await ctx.send(f"[📋 {target.display_name}'s HR History]({url})")
 
 
 # ------------------

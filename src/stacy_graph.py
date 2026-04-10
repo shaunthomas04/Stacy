@@ -29,10 +29,20 @@ SEVERITY_MAP = {
 def stacy_router(state: StacyState):
     system_prompt = (
         "You are an HR routing system. Analyze the message and return ONLY ONE WORD.\n"
-        "Keywords: 'ignore', 'hr_question', 'report_violation'.\n"
-        "If the user is asking about rules, use 'hr_question'.\n"
-        "If the user is reporting bad behavior or being abusive, use 'report_violation'.\n"
-        "Otherwise, use 'ignore'."
+        "Keywords: 'ignore', 'hr_question', 'report_violation'.\n\n"
+        "Use 'report_violation' ONLY for clear, egregious violations such as:\n"
+        "- Slurs, hate speech, or targeted harassment\n"
+        "- Explicit threats of violence\n"
+        "- Severe bullying or personal attacks\n\n"
+        "Use 'hr_question' ONLY if the user is explicitly asking about rules or policies.\n\n"
+        "Use 'ignore' for EVERYTHING else, including:\n"
+        "- Mild rudeness, sarcasm, or venting\n"
+        "- Swearing that isn't directed at anyone\n"
+        "- Jokes, memes, or edgy humor\n"
+        "- Normal conversation, even if slightly negative\n"
+        "- Anything ambiguous or borderline\n\n"
+        "When in doubt, ALWAYS return 'ignore'. "
+        "It is much better to ignore something borderline than to over-police normal chat."
     )
 
     try:
@@ -72,12 +82,14 @@ def report_node(state: StacyState):
 
     {"severity": "warning", "points": 0}
 
-    Rules:
-    - "warning" (0 points): Mild rudeness, borderline language
-    - "minor" (1-3 points): Clear policy violations, repeated rudeness
-    - "severe" (4-10 points): Hate speech, slurs, harassment, threats
+    Rules — be CONSERVATIVE, most messages should not reach you at all:
+    - "warning" (0 points): Borderline content, mild directed insults, first offense tone issues
+    - "minor" (1-3 points): Clear policy violations, repeated targeted rudeness, low-grade slurs
+    - "severe" (4-10 points): Explicit hate speech, slurs directed at a person or group, threats, serious harassment
 
-    Return ONLY the JSON, no explanation."""
+    Only assign "severe" for things that would get someone banned in any normal server.
+    Only assign "minor" for things that are unambiguously rude or offensive, not just edgy.
+    Default to "warning" if you are unsure. Return ONLY the JSON, no explanation."""
 
     response = llm.invoke([
         SystemMessage(content=system_prompt),
