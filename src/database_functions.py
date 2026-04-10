@@ -117,6 +117,28 @@ def get_hr_report_data(user_id, guild_id):
         cursor.close()
         conn.close()
 
+
+def get_user_score(user_id: str, guild_id: str) -> int:
+    """Returns the user's current social credit score. Returns 0 if user not found."""
+    conn = get_connection()
+    if not conn: return 0
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT social_credit_score FROM users WHERE user_id = %s AND guild_id = %s",
+            (str(user_id), str(guild_id))
+        )
+        row = cursor.fetchone()
+        return row[0] if row else 0
+    except Error as e:
+        print(f"Error fetching user score: {e}")
+        return 0
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # --- Execution Block ---
 
 if __name__ == "__main__":
