@@ -5,7 +5,6 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
 from stacy_graph_tools import StacyState, lookup_hr_policy, warn_user, upload_minor_infraction, upload_severe_infraction
-from database_functions import upsert_user
 
 # 1. LOAD ENVIRONMENT
 load_dotenv()
@@ -132,10 +131,6 @@ def apply_infraction_node(state: StacyState):
     gid = state.get("guild_id", "UnknownGuild")
     pts = state.get("points", 0)
     last_msg = _text(state["messages"][-1]) or "[image only]"
-
-    # Auto-register both users before any DB write
-    upsert_user(target, gid, target)
-    upsert_user(uid, gid, uid)
 
     if sev == "warning":
         action_taken = "issued a formal warning (0 points)"

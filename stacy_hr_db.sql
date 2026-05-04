@@ -5,10 +5,13 @@ USE stacy_hr_db;
 -- 1. Servers Table
 -- Each server gets its own personality/policy block
 CREATE TABLE IF NOT EXISTS guilds (
-    guild_id VARCHAR(255) PRIMARY KEY,
-    guild_name VARCHAR(255),
-    hr_policy_text TEXT, 
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    guild_id              VARCHAR(255) PRIMARY KEY,
+    guild_name            VARCHAR(255),
+    hr_policy_text        TEXT,
+    decay_interval_minutes INT DEFAULT 1440,
+    decay_amount          INT DEFAULT 5,
+    last_decay_at         DATETIME DEFAULT NULL,
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 2. Users Table

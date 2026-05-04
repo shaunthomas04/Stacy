@@ -15,7 +15,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Import the compiled graph from your agent file
 from stacy_graph import app
-from database_functions import upsert_user, initialize_guild, get_user_score, get_guild_policy, update_guild_policy
+from database_functions import (
+    upsert_user, initialize_guild, get_user_score,
+    get_guild_policy, update_guild_policy,
+    set_decay_interval, set_decay_amount, decay_scores_due,
+)
 from report import generate_hr_report
 from social_credit import sync_all_roles, setup_and_assign_hr_role
 
@@ -75,6 +79,17 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 # ------------------
+# Constants
+# ------------------
+
+DEFAULT_POLICY = (
+    "Be respectful to all members. No harassment, hate speech, slurs, or targeted abuse. "
+    "Keep discussions civil, avoid spamming, and do not share NSFW content outside designated channels. "
+    "Repeated or severe violations will be escalated. Stacy is always watching."
+)
+
+
+# ------------------
 # Cron Job
 # ------------------
 
@@ -83,10 +98,24 @@ async def role_sync_job():
     print("⏰ Cron: Starting scheduled role sync...")
     for guild in bot.guilds:
         try:
+            initialize_guild(str(guild.id), guild.name, DEFAULT_POLICY)
             await sync_all_roles(guild)
         except Exception as e:
             print(f"❌ Cron error for guild {guild.name}: {e}")
     print("⏰ Cron: Role sync complete.")
+
+
+async def decay_job():
+    """Runs every minute — applies score decay to any guilds that are due."""
+    decayed_ids = await asyncio.to_thread(decay_scores_due)
+    if decayed_ids:
+        print(f"⏰ Decay applied to guild(s): {decayed_ids}")
+        for guild in bot.guilds:
+            if str(guild.id) in decayed_ids:
+                try:
+                    await sync_all_roles(guild)
+                except Exception as e:
+                    print(f"❌ Role sync after decay failed for {guild.name}: {e}")
 
 
 # ------------------
@@ -146,8 +175,9 @@ async def on_ready():
     # Start the scheduler once the bot is ready and the event loop is running
     scheduler = AsyncIOScheduler()
     scheduler.add_job(role_sync_job, "interval", minutes=5)
+    scheduler.add_job(decay_job, "interval", minutes=1)
     scheduler.start()
-    print("⏰ Role sync scheduler started — running every 5 minutes")
+    print("⏰ Schedulers started — role sync every 5 min, decay check every 1 min")
 
     # Run an immediate sync on startup so roles are correct right away
     await role_sync_job()
@@ -163,11 +193,6 @@ async def on_message(message):
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
 
-    DEFAULT_POLICY = (
-        "Be respectful to all members. No harassment, hate speech, slurs, or targeted abuse. "
-        "Keep discussions civil, avoid spamming, and do not share NSFW content outside designated channels. "
-        "Repeated or severe violations will be escalated. Stacy is always watching."
-    )
     initialize_guild(guild_id, message.guild.name, DEFAULT_POLICY)
     hr_policy = get_guild_policy(guild_id) or DEFAULT_POLICY
 
@@ -291,6 +316,38 @@ async def set_policy(ctx, *, policy: str = None):
 
     update_guild_policy(str(ctx.guild.id), policy)
     await ctx.send("Policy has been updated!")
+
+
+@bot.command(name="SetDecayInterval")
+async def set_decay_interval_cmd(ctx, minutes: int = None):
+    """
+    Usage: !SetDecayInterval <minutes>
+    Server owner only. Sets how often score decay runs (default: 1440 = 24 hours).
+    """
+    if ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("Only server owners can update decay settings.")
+        return
+    if minutes is None or minutes < 1:
+        await ctx.send("Usage: `!SetDecayInterval <minutes>` — e.g. `!SetDecayInterval 1440` for 24 hours.")
+        return
+    set_decay_interval(str(ctx.guild.id), minutes)
+    await ctx.send(f"Decay interval updated — scores will decay every {minutes} minute(s).")
+
+
+@bot.command(name="SetDecayAmount")
+async def set_decay_amount_cmd(ctx, amount: int = None):
+    """
+    Usage: !SetDecayAmount <points>
+    Server owner only. Sets how many points are removed per decay tick (default: 5).
+    """
+    if ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("Only server owners can update decay settings.")
+        return
+    if amount is None or amount < 1:
+        await ctx.send("Usage: `!SetDecayAmount <points>` — e.g. `!SetDecayAmount 5`.")
+        return
+    set_decay_amount(str(ctx.guild.id), amount)
+    await ctx.send(f"Decay amount updated — {amount} point(s) will be removed per decay tick.")
 
 
 @bot.command(name="History")

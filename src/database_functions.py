@@ -43,6 +43,82 @@ def initialize_guild(guild_id, guild_name, policy_text):
         cursor.close()
         conn.close()
 
+def set_decay_interval(guild_id: str, minutes: int):
+    """Updates how often (in minutes) score decay runs for a guild."""
+    conn = get_connection()
+    if not conn: return
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE guilds SET decay_interval_minutes = %s WHERE guild_id = %s",
+            (minutes, str(guild_id))
+        )
+        conn.commit()
+    except Error as e:
+        print(f"Error setting decay interval: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def set_decay_amount(guild_id: str, amount: int):
+    """Updates how many points are removed per decay tick for a guild."""
+    conn = get_connection()
+    if not conn: return
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE guilds SET decay_amount = %s WHERE guild_id = %s",
+            (amount, str(guild_id))
+        )
+        conn.commit()
+    except Error as e:
+        print(f"Error setting decay amount: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def decay_scores_due() -> list[str]:
+    """
+    Checks all guilds and applies score decay to any that are due.
+    Returns a list of guild_ids that were decayed.
+    """
+    conn = get_connection()
+    if not conn: return []
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT guild_id, decay_amount
+            FROM guilds
+            WHERE last_decay_at IS NULL
+               OR TIMESTAMPDIFF(SECOND, last_decay_at, NOW()) >= decay_interval_minutes * 60
+        """)
+        due_guilds = cursor.fetchall()
+
+        for guild in due_guilds:
+            gid = guild["guild_id"]
+            amount = guild["decay_amount"]
+            cursor.execute("""
+                UPDATE users
+                SET social_credit_score = GREATEST(0, social_credit_score - %s)
+                WHERE guild_id = %s
+            """, (amount, gid))
+            cursor.execute(
+                "UPDATE guilds SET last_decay_at = NOW() WHERE guild_id = %s",
+                (gid,)
+            )
+
+        conn.commit()
+        return [g["guild_id"] for g in due_guilds]
+    except Error as e:
+        print(f"Error during score decay: {e}")
+        return []
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_guild_policy(guild_id: str) -> str:
     """Returns the HR policy text for a guild, or an empty string if not found."""
     conn = get_connection()
