@@ -1,7 +1,10 @@
 discord
 python-dotenv
 langchain
-langchain-ollama
 langchain-openai
 langgraph
 mysql-connector-python
+fastapi
+uvicorn
+pyngrok
+apscheduler

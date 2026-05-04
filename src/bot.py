@@ -286,7 +286,7 @@ async def hr_report(ctx, member: discord.Member = None):
         return
 
     url = f"{PUBLIC_URL}/report/{guild_id}/{user_id}"
-    await ctx.send(f"[📋 {target.display_name}'s HR History]({url})")
+    await ctx.send(f"[{target.display_name}'s HR History]({url})")
 
 
 # ------------------
