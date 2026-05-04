@@ -92,13 +92,13 @@ Defines the LangGraph `StateGraph` and compiles it to `app`. Four nodes:
 - `silent_ignore_node` — returns a sentinel string so `bot.py` knows to stay quiet
 
 ### `stacy_graph_tools.py`
-Defines `StacyState` (the TypedDict that flows through the graph) and four `@tool` functions:
-- `lookup_hr_policy` — **currently returns hardcoded text** — should query `guilds` table
+Defines `StacyState` (the TypedDict that flows through the graph) and three `@tool` functions:
+- `lookup_hr_policy(guild_id, user_question)` — queries `guilds.hr_policy_text` for the current server
 - `warn_user` — writes a Low severity, 0-point record to `infractions`
 - `upload_minor_infraction` — writes Medium severity to `infractions`
 - `upload_severe_infraction` — writes Critical severity to `infractions`
 
-Note: `determine_severity` exists in this file but is **not used** — severity is determined inline in `report_node` via JSON parsing.
+Severity is determined inline in `report_node` via LLM JSON output, not by a tool.
 
 ### `database_functions.py`
 All MySQL operations. Key functions:
@@ -206,20 +206,11 @@ This means normal chat costs ~1 API call per message. High-traffic servers shoul
 - Second `scheduler.add_job` in `on_ready` with `trigger='cron', hour=0`
 - After decay, trigger a role sync so roles reflect the new scores immediately
 
-### 5. !AskStacy / !TellStacy Commands
-- `!AskStacy <question>` — bypasses router, calls `hr_node` directly
-- `!TellStacy @user <reason>` — bypasses router, calls `report_node` → `apply_infraction_node` directly
-
----
-
 ## Known Issues / Gotchas
 
-- **`lookup_hr_policy` is hardcoded** — returns a fake string, never queries the DB. The policy stored via `initialize_guild()` is never actually read by the LLM.
-- **`determine_severity` tool is dead code** — defined in `stacy_graph_tools.py` but never called. Severity is determined inline in `report_node`.
 - **`social_credit.py __main__` block** reads `GUILD_ID`/`USER_ID` from `.env` — these are only used for the standalone test runner, not the bot.
 - **FastAPI + ngrok race condition** — if ngrok is slow to connect, `PUBLIC_URL` may not be set before the first report request. In practice this hasn't been an issue.
 - **Score is "social debt"** — higher score is *worse*. Zero is a clean record. This is the opposite of a typical "credit score" but is intentional for the HR theme.
-- **`image_b64` / `image_mime` are threaded through state** but the LLM calls in `stacy_graph.py` don't actually use them yet. Vision moderation is scaffolded but not wired.
 
 ---
 

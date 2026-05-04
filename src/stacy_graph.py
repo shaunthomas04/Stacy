@@ -27,10 +27,14 @@ SEVERITY_MAP = {
 # 4. NODES
 
 def stacy_router(state: StacyState):
+    hr_policy = state.get("hr_policy", "")
+    policy_block = f"\n\nThis server's HR policy:\n{hr_policy}" if hr_policy else ""
+
     system_prompt = (
-        "You are an HR routing system. Analyze the message and return ONLY ONE WORD.\n"
-        "Keywords: 'ignore', 'hr_question', 'report_violation'.\n\n"
-        "Use 'report_violation' ONLY for clear, egregious violations such as:\n"
+        f"You are an HR routing system. Analyze the message and return ONLY ONE WORD.\n"
+        f"Keywords: 'ignore', 'hr_question', 'report_violation'.{policy_block}\n\n"
+        "Use 'report_violation' if the message clearly violates the server HR policy above, "
+        "OR if it contains any of the following regardless of policy:\n"
         "- Slurs, hate speech, or targeted harassment\n"
         "- Explicit threats of violence\n"
         "- Severe bullying or personal attacks\n\n"
@@ -61,8 +65,18 @@ def stacy_router(state: StacyState):
         return "ignore"
 
 
+def _text(msg) -> str:
+    c = msg.content
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    return c
+
+
 def hr_node(state: StacyState):
-    policy_text = lookup_hr_policy.invoke({"user_question": state["messages"][-1].content})
+    policy_text = lookup_hr_policy.invoke({
+        "guild_id": state["guild_id"],
+        "user_question": _text(state["messages"][-1]),
+    })
 
     prompt = [
         SystemMessage(content="You are Stacy, a helpful but slightly sassy HR bot. "
@@ -76,19 +90,21 @@ def hr_node(state: StacyState):
 
 
 def report_node(state: StacyState):
-    last_msg = state["messages"][-1].content
+    last_msg = _text(state["messages"][-1]) or "[image]"
+    hr_policy = state.get("hr_policy", "")
+    policy_block = f"\n\nThis server's HR policy (use this to calibrate severity):\n{hr_policy}" if hr_policy else ""
 
-    system_prompt = """You are Stacy, an HR enforcement bot. Analyze this message and return ONLY a JSON object.
+    system_prompt = f"""You are Stacy, an HR enforcement bot. Analyze this message and return ONLY a JSON object.{policy_block}
 
-    {"severity": "warning", "points": 0}
+    {{"severity": "warning", "points": 0}}
 
     Rules — be CONSERVATIVE, most messages should not reach you at all:
     - "warning" (0 points): Borderline content, mild directed insults, first offense tone issues
     - "minor" (1-3 points): Clear policy violations, repeated targeted rudeness, low-grade slurs
     - "severe" (4-10 points): Explicit hate speech, slurs directed at a person or group, threats, serious harassment
 
+    If the message violates a specific rule in the server HR policy above, treat it as at least "minor".
     Only assign "severe" for things that would get someone banned in any normal server.
-    Only assign "minor" for things that are unambiguously rude or offensive, not just edgy.
     Default to "warning" if you are unsure. Return ONLY the JSON, no explanation."""
 
     response = llm.invoke([
@@ -115,7 +131,7 @@ def apply_infraction_node(state: StacyState):
     target = state.get("target_user_id", uid)           # who actually gets the infraction
     gid = state.get("guild_id", "UnknownGuild")
     pts = state.get("points", 0)
-    last_msg = state["messages"][-1].content
+    last_msg = _text(state["messages"][-1]) or "[image only]"
 
     # Auto-register both users before any DB write
     upsert_user(target, gid, target)

@@ -1,4 +1,3 @@
-import random
 from typing import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
@@ -10,20 +9,28 @@ class StacyState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     user_id: str
     guild_id: str
-    target_user_id: str 
+    target_user_id: str
+    hr_policy: str
     severity: str
     points: int
 
 # 4. TOOLS
 @tool
-def lookup_hr_policy(user_question: str) -> str:
-    """Look up Discord HR policy to answer user questions."""
-    return "According to Discord HR policy, you need prior approval for early leave."
-
-@tool
-def determine_severity(user_complaint: str) -> str:
-    """Analyze a user's speech/message to determine the severity of a violation."""
-    return random.choice(["warning", "minor", "severe"])
+def lookup_hr_policy(guild_id: str, user_question: str) -> str:
+    """Look up this Discord server's HR policy to answer user questions."""
+    conn = get_connection()
+    if not conn:
+        return "HR policy unavailable at this time."
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT hr_policy_text FROM guilds WHERE guild_id = %s", (guild_id,))
+        row = cursor.fetchone()
+        return row[0] if row else "No HR policy has been configured for this server."
+    except Exception as e:
+        return f"Error fetching HR policy: {e}"
+    finally:
+        cursor.close()
+        conn.close()
 
 @tool
 def warn_user(user_id: str, guild_id: str, message: str) -> str:

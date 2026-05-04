@@ -85,15 +85,7 @@ The cron scheduler already runs every 5 minutes for role sync. Add a second sche
 
 ---
 
-#### 5. !AskStacy and !TellStacy Commands
-Explicit commands that route directly to specific LangGraph nodes, bypassing the router.
-
-- `!AskStacy <question>` — skips the router and goes straight to `hr_node`
-- `!TellStacy @user <reason>` — skips the router and goes straight to `report_node` with the mentioned user as `target_user_id`
-
----
-
-#### 6. Forum Thread Escalation (Future)
+#### 5. Forum Thread Escalation (Future)
 For Critical severity infractions, automatically create a Discord forum thread in a designated HR channel for open discussion. The `upload_severe_infraction` tool already marks these — it just needs the actual `guild.create_thread()` call wired in.
 
 ---

@@ -15,7 +15,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Import the compiled graph from your agent file
 from stacy_graph import app
-from database_functions import upsert_user, initialize_guild, get_user_score
+from database_functions import upsert_user, initialize_guild, get_user_score, get_guild_policy, update_guild_policy
 from report import generate_hr_report
 from social_credit import sync_all_roles, setup_and_assign_hr_role
 
@@ -98,6 +98,7 @@ async def run_stacy(
     guild_id: str,
     target_user_id: str,
     message_content: str,
+    hr_policy: str = "",
     image_b64: str = "",
     image_mime: str = "",
 ) -> str | None:
@@ -105,13 +106,20 @@ async def run_stacy(
     Runs the Stacy LangGraph agent and returns the final response string, or None if ignored.
     Wrapped in asyncio.to_thread since LangGraph is synchronous.
     """
+    if image_b64:
+        msg_content = [
+            {"type": "text", "text": message_content or ""},
+            {"type": "image_url", "image_url": {"url": f"data:{image_mime};base64,{image_b64}"}},
+        ]
+    else:
+        msg_content = message_content or "[no message]"
+
     inputs = {
-        "messages": [HumanMessage(content=message_content or "[image only]")],
+        "messages": [HumanMessage(content=msg_content)],
         "user_id": user_id,
         "guild_id": guild_id,
         "target_user_id": target_user_id,
-        "image_b64": image_b64,
-        "image_mime": image_mime,
+        "hr_policy": hr_policy,
     }
 
     def _run():
@@ -155,14 +163,13 @@ async def on_message(message):
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
 
-    hr_policy = (
-        "Welcome to the server. We expect all members to treat each other with basic respect at all times. "
-        "Harassment, hate speech, slurs, and targeted abuse of any kind will result in immediate action. "
-        "Keep discussions civil, avoid spamming, and do not share inappropriate or NSFW content outside of "
-        "designated channels. Repeated or severe violations will be escalated and may result in removal from "
-        "the server. Stacy is always watching. 👀"
+    DEFAULT_POLICY = (
+        "Be respectful to all members. No harassment, hate speech, slurs, or targeted abuse. "
+        "Keep discussions civil, avoid spamming, and do not share NSFW content outside designated channels. "
+        "Repeated or severe violations will be escalated. Stacy is always watching."
     )
-    initialize_guild(guild_id, message.guild.name, hr_policy)
+    initialize_guild(guild_id, message.guild.name, DEFAULT_POLICY)
+    hr_policy = get_guild_policy(guild_id) or DEFAULT_POLICY
 
     # Check for image attachments
     image_b64 = ""
@@ -194,7 +201,7 @@ async def on_message(message):
         async with message.channel.typing():
             response = await run_stacy(
                 user_id, guild_id, target_user_id,
-                message.content, image_b64, image_mime
+                message.content, hr_policy, image_b64, image_mime
             )
 
         if response:
@@ -214,7 +221,7 @@ async def on_message(message):
 
         response = await run_stacy(
             user_id, guild_id, user_id,
-            message.content, image_b64, image_mime
+            message.content, hr_policy, image_b64, image_mime
         )
 
         if response:
@@ -266,6 +273,24 @@ async def helpme(ctx):
         "Mention `@Stacy` and then `@username` in the same message.\n"
         "Example: `@Stacy @BadActor42 just used a slur in general`"
     )
+
+
+@bot.command(name="SetPolicy")
+async def set_policy(ctx, *, policy: str = None):
+    """
+    Usage: !SetPolicy <new policy text>
+    Server owner only. Updates this server's HR policy in the database.
+    """
+    if ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("Only server owners can update policy.")
+        return
+
+    if not policy:
+        await ctx.send("Usage: `!SetPolicy <policy text>`")
+        return
+
+    update_guild_policy(str(ctx.guild.id), policy)
+    await ctx.send("Policy has been updated!")
 
 
 @bot.command(name="History")

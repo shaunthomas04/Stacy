@@ -31,9 +31,8 @@ def initialize_guild(guild_id, guild_name, policy_text):
         sql = """
             INSERT INTO guilds (guild_id, guild_name, hr_policy_text)
             VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE 
-                guild_name = VALUES(guild_name),
-                hr_policy_text = VALUES(hr_policy_text);
+            ON DUPLICATE KEY UPDATE
+                guild_name = VALUES(guild_name);
         """
         cursor.execute(sql, (str(guild_id), guild_name, policy_text))
         conn.commit()
@@ -43,6 +42,42 @@ def initialize_guild(guild_id, guild_name, policy_text):
     finally:
         cursor.close()
         conn.close()
+
+def get_guild_policy(guild_id: str) -> str:
+    """Returns the HR policy text for a guild, or an empty string if not found."""
+    conn = get_connection()
+    if not conn:
+        return ""
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT hr_policy_text FROM guilds WHERE guild_id = %s", (str(guild_id),))
+        row = cursor.fetchone()
+        return row[0] if row else ""
+    except Error as e:
+        print(f"Error fetching guild policy: {e}")
+        return ""
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def update_guild_policy(guild_id: str, policy_text: str):
+    """Overwrites the HR policy for a guild."""
+    conn = get_connection()
+    if not conn: return
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE guilds SET hr_policy_text = %s WHERE guild_id = %s",
+            (policy_text, str(guild_id))
+        )
+        conn.commit()
+    except Error as e:
+        print(f"Error updating guild policy: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
 
 def upsert_user(user_id, guild_id, username, initial_score=0):
     """
