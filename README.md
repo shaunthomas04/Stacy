@@ -119,6 +119,7 @@ https://discord.com/oauth2/authorize?client_id=1449588724265521154&scope=bot&per
 | `!setDecayInterval <minutes>` | How often scores decay (default: 1440) |
 | `!setDecayAmount <points>` | Points removed per decay tick (default: 5) |
 | `!pardon @user` | Clear a user's record and reset score to 0 |
+| `!resolve` | Post a closing note from Stacy and delete the current policy-violations thread |
 
 ---
 

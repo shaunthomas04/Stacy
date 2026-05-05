@@ -15,7 +15,7 @@ import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Import the compiled graph from your agent file
-from stacy_graph import app, get_forum_response
+from stacy_graph import app, get_forum_response, get_pardon_response, get_resolve_response
 from database_functions import (
     upsert_user, initialize_guild, get_user_score,
     get_guild_policy, update_guild_policy,
@@ -201,12 +201,17 @@ async def _handle_forum_message(message: discord.Message):
 
     context = "\n".join(f"{name}: {msg}" for name, msg in thread_buffers[thread_id])
 
-    async with message.channel.typing():
-        response = await asyncio.to_thread(
-            get_forum_response, message.channel.name, context, directly_addressed
-        )
-    if response:
-        await message.reply(response[:1990])
+    try:
+        async with message.channel.typing():
+            response = await asyncio.to_thread(
+                get_forum_response, message.channel.name, context, directly_addressed
+            )
+        if response:
+            await message.reply(response[:1990])
+    except discord.errors.NotFound:
+        # Thread was deleted (e.g. via !resolve) before the response could be sent
+        thread_buffers.pop(thread_id, None)
+        thread_message_counts.pop(thread_id, None)
 
 
 async def run_stacy(
@@ -307,7 +312,9 @@ async def on_message(message):
     if isinstance(message.channel, discord.Thread):
         parent = message.channel.parent
         if isinstance(parent, discord.ForumChannel) and parent.name == "policy-violations":
-            await _handle_forum_message(message)
+            ctx = await bot.get_context(message)
+            if not ctx.valid:
+                await _handle_forum_message(message)
             return
 
     guild_id = str(message.guild.id)
@@ -437,7 +444,8 @@ async def stacy_help(ctx):
         "`!setSensitivity <low|medium|high>` — Set how strictly Stacy enforces policy *(default: low)*\n"
         "`!setDecayInterval <minutes>` — How often scores decay *(default: 1440 min)*\n"
         "`!setDecayAmount <points>` — Points removed per decay tick *(default: 5)*\n"
-        "`!pardon @user` — Clear a user's record and reset their score to 0\n\n"
+        "`!pardon @user` — Clear a user's record and reset their score to 0\n"
+        "`!resolve` — Post a closing note and delete the current policy-violations thread\n\n"
         "👀 **PASSIVE MODERATION**\n"
         "Stacy reads every message and enforces server policy automatically.\n"
         "`@Stacy <question>` — Ask Stacy about HR rules\n"
@@ -514,12 +522,31 @@ async def pardon(ctx, member: discord.Member = None):
         await setup_and_assign_hr_role(ctx.guild, member, 0)
     except Exception as e:
         print(f"❌ Role reset failed for {member.display_name}: {e}")
-    await ctx.send(
-        f"I've been asked to process a full pardon for {member.display_name}. "
-        f"Their record has been cleared and their standing reset to HR Approved. "
-        f"I do want to note — just for the record — that I had some reservations about this, "
-        f"but it's not my call. Fresh start, I guess."
-    )
+    async with ctx.typing():
+        response = await asyncio.to_thread(get_pardon_response, member.display_name)
+    await ctx.send(response)
+
+
+@bot.command(name="resolve")
+async def resolve_thread(ctx):
+    if ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("Only server owners can resolve HR threads.")
+        return
+    if not isinstance(ctx.channel, discord.Thread):
+        await ctx.send("This command can only be used inside a policy-violations forum thread.")
+        return
+    parent = ctx.channel.parent
+    if not isinstance(parent, discord.ForumChannel) or parent.name != "policy-violations":
+        await ctx.send("This command can only be used inside a policy-violations forum thread.")
+        return
+
+    async with ctx.typing():
+        response = await asyncio.to_thread(get_resolve_response, ctx.channel.name)
+    await ctx.send(response)
+
+    thread_buffers.pop(ctx.channel.id, None)
+    thread_message_counts.pop(ctx.channel.id, None)
+    await ctx.channel.delete()
 
 
 @bot.command(name="history")

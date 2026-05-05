@@ -117,6 +117,7 @@ All MySQL operations. Key functions:
 - `get_guild_sensitivity(guild_id)` / `set_guild_sensitivity(guild_id, level)`
 - `set_decay_interval(guild_id, minutes)` / `set_decay_amount(guild_id, amount)`
 - `reset_user_score(user_id, guild_id)` — sets score to 0 (used by `!pardon`)
+- `get_pardon_response(member_name)` and `get_resolve_response(thread_name)` — standalone LLM calls in `stacy_graph.py` for commands that need Stacy's voice without the full LangGraph pipeline
 - `get_hr_report_data(user_id, guild_id)` — LEFT JOIN for report generation
 - `get_user_score(user_id, guild_id)` — returns current score integer
 
