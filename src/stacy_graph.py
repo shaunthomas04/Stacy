@@ -256,6 +256,52 @@ workflow.add_edge("silent_ignore", END)
 app = workflow.compile()
 
 
+def get_appeal_decision(
+    username: str,
+    infraction_context: str,
+    severity: str,
+    points: int,
+    appeal_reason: str,
+) -> dict:
+    max_removable = points
+    system_prompt = f"""You are Stacy from HR reviewing a formal appeal from {username}.
+
+Original infraction: {severity} severity, {points} point(s).
+Violation: {infraction_context}
+Their appeal: {appeal_reason}
+
+Decide whether to uphold or dismiss the appeal. Be fair but thorough.
+Genuine remorse, valid context, or mitigating circumstances may reduce or clear points.
+Weak, dismissive, or dishonest appeals should be upheld.
+
+Return ONLY a JSON object:
+{{"decision": "upheld|partial|dismissed", "points_removed": <0 to {max_removable}>, "message": "<Stacy response>"}}
+
+Rules:
+- "upheld": appeal rejected, points_removed must be 0
+- "partial": valid mitigating factors, points_removed must be between 1 and {max(1, max_removable - 1)}
+- "dismissed": fully accepted, points_removed must equal {max_removable}
+- If points is 0, only "upheld" or "dismissed" apply (no partial)
+- The message must be in Stacy's voice — earnest HR person, reacts to what they actually said
+- 2-3 sentences, no emojis, no sign-off"""
+
+    response = llm.invoke([SystemMessage(content=system_prompt)])
+    try:
+        clean = response.content.strip().strip("```json").strip("```").strip()
+        result = json.loads(clean)
+        return {
+            "decision": result.get("decision", "upheld"),
+            "points_removed": int(result.get("points_removed", 0)),
+            "message": result.get("message", "Your appeal has been reviewed and the original infraction will stand."),
+        }
+    except (json.JSONDecodeError, ValueError):
+        return {
+            "decision": "upheld",
+            "points_removed": 0,
+            "message": "Your appeal has been reviewed and the original infraction will stand.",
+        }
+
+
 def get_pardon_response(member_name: str) -> str:
     system_prompt = (
         f"You are Stacy from HR. You have been instructed to process a full pardon for {member_name} — "

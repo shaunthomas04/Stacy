@@ -15,13 +15,13 @@ import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Import the compiled graph from your agent file
-from stacy_graph import app, get_forum_response, get_pardon_response, get_resolve_response
+from stacy_graph import app, get_forum_response, get_pardon_response, get_resolve_response, get_appeal_decision
 from database_functions import (
     upsert_user, initialize_guild, get_user_score,
     get_guild_policy, update_guild_policy,
     set_decay_interval, set_decay_amount, decay_scores_due,
     get_guild_sensitivity, set_guild_sensitivity,
-    reset_user_score,
+    reset_user_score, get_latest_infraction, mark_infraction_appealed, deduct_user_score,
 )
 from report import generate_hr_report
 from social_credit import sync_all_roles, setup_and_assign_hr_role
@@ -308,6 +308,10 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
+    ctx = await bot.get_context(message)
+    if ctx.valid:
+        return
+
     # Forum thread: messages in policy-violations threads get dedicated context-aware handling
     if isinstance(message.channel, discord.Thread):
         parent = message.channel.parent
@@ -438,7 +442,8 @@ async def stacy_help(ctx):
         "📋 **GENERAL**\n"
         "`!stacyHelp` — Show this menu\n"
         "`!policy` — View this server's HR policy\n"
-        "`!history @user` — Pull up a user's HR report\n\n"
+        "`!history @user` — Pull up a user's HR report\n"
+        "`!appeal <reason>` — Appeal your most recent infraction\n\n"
         "🔒 **SERVER OWNER ONLY**\n"
         "`!setPolicy <text>` — Update the server's HR rules\n"
         "`!setSensitivity <low|medium|high>` — Set how strictly Stacy enforces policy *(default: low)*\n"
@@ -453,6 +458,45 @@ async def stacy_help(ctx):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "*Stacy is always watching.* 👁️"
     )
+
+
+@bot.command(name="appeal")
+async def appeal(ctx, *, reason: str = None):
+    if not reason:
+        await ctx.send("Usage: `!appeal <your reason>`")
+        return
+
+    guild_id = str(ctx.guild.id)
+    user_id = str(ctx.author.id)
+
+    infraction = get_latest_infraction(user_id, guild_id)
+    if not infraction:
+        await ctx.send("You don't have any unappealed infractions on record.")
+        return
+
+    async with ctx.typing():
+        result = await asyncio.to_thread(
+            get_appeal_decision,
+            ctx.author.display_name,
+            infraction["violation_context"],
+            infraction["severity_level"],
+            infraction["score_penalty"],
+            reason,
+        )
+
+    mark_infraction_appealed(infraction["infraction_id"])
+
+    if result["points_removed"] > 0:
+        deduct_user_score(user_id, guild_id, result["points_removed"])
+        try:
+            score = get_user_score(user_id, guild_id)
+            member = ctx.guild.get_member(int(user_id))
+            if member:
+                await setup_and_assign_hr_role(ctx.guild, member, score)
+        except Exception as e:
+            print(f"❌ Role update failed after appeal: {e}")
+
+    await ctx.reply(result["message"])
 
 
 @bot.command(name="setPolicy")

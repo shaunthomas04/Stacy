@@ -24,7 +24,6 @@ A Discord HR enforcement bot powered by LangGraph and the OpenAI API. Stacy pass
 
 ## Planned
 
-- **`!appeal`** — user submits a written appeal against an infraction; Stacy reviews it via LLM and either upholds or dismisses it in character. A compelling appeal can result in points being removed.
 - **Infraction streaks** — if a user is flagged X times within Y minutes, Stacy automatically escalates regardless of individual severity. Configurable thresholds per guild.
 - **Good behaviour bonus** — after N days with no infractions, the user's score decays at an accelerated rate as a reward for staying clean.
 
@@ -107,6 +106,7 @@ https://discord.com/oauth2/authorize?client_id=1449588724265521154&scope=bot&per
 | `!stacyHelp` | Show the command menu |
 | `!policy` | View this server's current HR policy |
 | `!history @user` | Generate and serve an HTML HR report |
+| `!appeal <reason>` | Appeal your most recent infraction — Stacy reviews it and may reduce or clear points |
 | `!ping` | Health check |
 | `@Stacy <question>` | Ask Stacy an HR policy question |
 | `@Stacy @user <reason>` | Report a user to Stacy |

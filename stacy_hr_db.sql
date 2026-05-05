@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS guilds (
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 -- For existing installs: ALTER TABLE guilds ADD COLUMN sensitivity ENUM('low','medium','high') DEFAULT 'low';
+-- For existing installs: ALTER TABLE infractions ADD COLUMN appealed BOOLEAN DEFAULT FALSE;
 
 -- 2. Users Table
 -- Tracking the social standing and current "pay" status
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS infractions (
     stacy_inference TEXT,        
     severity_level ENUM('Low', 'Medium', 'High', 'Critical'),
     score_penalty INT,
+    appealed BOOLEAN DEFAULT FALSE,
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (guild_id) REFERENCES guilds(guild_id),
     FOREIGN KEY (user_id, guild_id) REFERENCES users(user_id, guild_id)

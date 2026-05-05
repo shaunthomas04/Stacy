@@ -265,6 +265,68 @@ def reset_user_score(user_id: str, guild_id: str):
         conn.close()
 
 
+def get_latest_infraction(user_id: str, guild_id: str) -> dict | None:
+    """Returns the most recent unappealed infraction for a user, or None."""
+    conn = get_connection()
+    if not conn:
+        return None
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT infraction_id, violation_context, severity_level, score_penalty
+            FROM infractions
+            WHERE user_id = %s AND guild_id = %s AND appealed = FALSE
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, (str(user_id), str(guild_id)))
+        return cursor.fetchone()
+    except Error as e:
+        print(f"Error fetching latest infraction: {e}")
+        return None
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def mark_infraction_appealed(infraction_id: int):
+    """Marks an infraction as appealed so it cannot be appealed again."""
+    conn = get_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE infractions SET appealed = TRUE WHERE infraction_id = %s",
+            (infraction_id,)
+        )
+        conn.commit()
+    except Error as e:
+        print(f"Error marking infraction appealed: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def deduct_user_score(user_id: str, guild_id: str, points: int):
+    """Subtracts points from a user's score, floored at 0."""
+    conn = get_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE users
+            SET social_credit_score = GREATEST(0, social_credit_score - %s)
+            WHERE user_id = %s AND guild_id = %s
+        """, (points, str(user_id), str(guild_id)))
+        conn.commit()
+    except Error as e:
+        print(f"Error deducting user score: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_hr_report_data(user_id, guild_id):
     """Fetches data needed for your !HRReport HTML generation."""
     conn = get_connection()
