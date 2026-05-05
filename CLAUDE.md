@@ -2,7 +2,7 @@
 
 ## What This Project Is
 
-Stacy is a Discord bot that acts as a satirical-but-functional HR department for Discord servers. It passively monitors chat using a sliding context window, logs policy violations as "infractions" to a MySQL database, tracks a per-user "social credit score", assigns Discord roles based on that score, and generates styled HTML compliance reports on demand. The tone is corporate-satirical — Stacy sounds like a sincere, slightly anxious HR rep who takes the rules very seriously and occasionally misreads the room.
+Stacy is a Discord bot that acts as a satirical-but-functional HR department for Discord servers. It passively monitors chat, logs policy violations as "infractions" to a MySQL database, tracks a per-user "social credit score", assigns Discord roles based on that score, handles appeals, escalates severe incidents to a forum channel, and generates styled HTML compliance reports on demand.
 
 The project runs entirely locally (Python process + MySQL), tunneled to the internet via ngrok for report serving.
 
@@ -14,16 +14,15 @@ The project runs entirely locally (Python process + MySQL), tunneled to the inte
 Stacy/
 ├── src/
 │   ├── bot.py                  # Discord bot entrypoint, all event handlers and commands
-│   ├── stacy_graph.py          # LangGraph agent definition (nodes, edges, router)
-│   ├── stacy_graph_tools.py    # LangGraph state type + tool definitions (DB write tools)
+│   ├── stacy_graph.py          # LangGraph agent + standalone LLM helpers
+│   ├── stacy_graph_tools.py    # LangGraph state type + DB write tools
 │   ├── database_functions.py   # All MySQL queries — single source of truth for DB access
 │   ├── social_credit.py        # Role assignment logic, sync_all_roles, score→role mapping
-│   ├── report.py               # HTML report generator (no DB access — takes raw data)
+│   ├── report.py               # HTML report generator (no DB access)
 │   └── temp/                   # Generated HTML report files (gitignored)
 ├── stacy_hr_db.sql             # Full MySQL schema (source of truth for DB structure)
-├── stacy_hr_view.sql           # Optional view definitions
 ├── requirements.txt
-├── .env                        # Not committed — see env vars section below
+├── .env                        # Not committed
 └── README.md
 ```
 
@@ -31,7 +30,7 @@ Stacy/
 
 ## Architecture
 
-### Request Flow — Passive Moderation
+### Message Flow — Passive Moderation
 
 ```
 Discord message
@@ -39,139 +38,136 @@ Discord message
       ▼
 on_message (bot.py)
       │
-      ├─ Is it a bot? → return (ignore)
-      ├─ process_commands() (handles !commands first)
-      ├─ upsert_user() (register sender in DB)
+      ├─ bot message? → return
+      ├─ process_commands() — handles !commands
+      ├─ valid command? → return (skip moderation)
       │
-      ├─ @mention path: runs immediately with target user resolution
+      ├─ policy-violations forum thread? → _handle_forum_message() → return
       │
-      └─ passive path: append to channel deque (maxlen=10)
-            │
-            ▼
-         build participants map + conversation string from window
+      ├─ @mention path: resolves target user, calls run_stacy() immediately
+      │
+      └─ passive path: calls run_stacy() on the current message
             │
             ▼
 run_stacy() → asyncio.to_thread → LangGraph app.stream()
-      │
+      │       returns (response_text, severity, points)
       ▼
 stacy_router (LLM call #1) — reads hr_policy + sensitivity from state
       │
-      ├─ "ignore"          → silent_ignore_node → no Discord reply
-      ├─ "hr_question"     → hr_node (LLM call #2) → reply to message
-      └─ "report_violation"→ report_node (LLM call #2) → apply_infraction_node (LLM call #3)
-                                                              │
-                                                              ├─ DB write (warn/minor/severe tool)
-                                                              └─ reply to message
+      ├─ "ignore"           → silent_ignore_node → no reply
+      ├─ "hr_question"      → hr_node (LLM call #2) → reply
+      └─ "report_violation" → report_node (LLM call #2)
+                                    │
+                                    ▼
+                             apply_infraction_node (LLM call #3)
+                                    │
+                                    ├─ DB write (warn / minor / severe tool)
+                                    └─ reply to message
+
+If severity == "severe": _post_violation_thread() opens a forum thread
+After any infraction: setup_and_assign_hr_role() updates the user's Discord role
 ```
 
-After any infraction, `bot.py` immediately calls `setup_and_assign_hr_role()` to update the offending user's Discord role.
+### Forum Thread Flow
 
-### Request Flow — @Mention with Target User
+Messages inside a `policy-violations` forum thread are handled separately by `_handle_forum_message()`. Stacy responds to every message when one person is talking, and backs off as more unique participants join (interval = `max(1, (unique_participants - 1) * 3)`). She responds immediately if directly mentioned. The thread buffer is pre-populated with the incident report so she always has context.
 
-When a message contains `@Stacy @someUser reason`, `bot.py` extracts the target user as `target_user_id` and passes it into the LangGraph state. The infraction is recorded against the *target*, not the reporter.
+### Cron Job
 
-### Cron Job (APScheduler)
-
-One job runs on the Discord event loop:
-- **Decay + role sync** — every 1 minute, calls `decay_scores_due()` which finds guilds where decay is due (based on their `decay_interval_minutes`), applies `GREATEST(0, score - decay_amount)`, then syncs roles for any guild whose scores changed.
+One APScheduler job runs every 1 minute: `decay_and_sync_job()` calls `decay_scores_due()` which finds guilds where decay is due, applies `GREATEST(0, score - decay_amount)`, updates `last_decay_at`, and syncs Discord roles for any affected guild.
 
 ---
 
-## Key Files — What Each One Does
+## Key Files
 
 ### `bot.py`
-The main entrypoint. Owns:
-- FastAPI server (background thread) + ngrok tunnel for report URLs
-- All Discord event handlers (`on_ready`, `on_message`, `on_member_join`)
-- All `!commands`: `ping`, `hello`, `policy`, `stacyHelp`, `setPolicy`, `setSensitivity`, `setDecayInterval`, `setDecayAmount`, `pardon`, `history`
-- The APScheduler setup (`decay_and_sync_job` every 1 minute)
+- FastAPI + ngrok for report serving (background thread)
+- All event handlers: `on_ready`, `on_message`, `on_member_join`
+- All commands: `ping`, `hello`, `policy`, `stacyHelp`, `appeal`, `setPolicy`, `setSensitivity`, `setDecayInterval`, `setDecayAmount`, `pardon`, `resolve`, `history`
 - `run_stacy()` — wraps LangGraph in `asyncio.to_thread`, returns `(response_text, severity, points)`
-- `_get_violations_forum(guild)` — finds or creates the `policy-violations` forum channel
-- `_post_violation_thread(guild, target_name, pts, violation_msg)` — opens a new thread in the forum on severe infractions
-- In-memory caches: `_guild_cache` (policy strings), `_sensitivity_cache` (sensitivity strings)
-- `_ensure_guild(guild_id, guild_name)` — initialises guild in DB on first message, populates both caches
+- `_handle_forum_message()` — manages per-thread buffers and Stacy's participation cadence
+- `_get_violations_forum()` / `_post_violation_thread()` — forum channel management
+- `_forum_interval()` — calculates response cadence based on unique participant count
+- In-memory caches: `_guild_cache` (policy), `_sensitivity_cache` (sensitivity), `thread_buffers`, `thread_message_counts`
+- `_ensure_guild()` — initialises guild in DB on first message, populates caches
 
 ### `stacy_graph.py`
-Defines the LangGraph `StateGraph` and compiles it to `app`. Nodes:
-- `stacy_router` — classifies the message as `ignore` / `hr_question` / `report_violation`. Uses `_ROUTER_PROMPTS` dict to select a system prompt based on `state["sensitivity"]` (low / medium / high).
-- `hr_node` — answers HR policy questions. Earnest, slightly over-literal tone, hedges frequently.
-- `report_node` — asks the LLM to output `{"severity": "...", "points": N}` JSON. Batch mode adds `"violator"` field.
-- `apply_infraction_node` — dispatches to correct DB tool, generates Stacy's reply. Three severity-specific prompts: warning (just flagging it), minor (apologetic but logged), severe (clear and direct but uncomfortable).
-- `silent_ignore_node` — returns sentinel string so `bot.py` knows to stay quiet.
+LangGraph `StateGraph` compiled to `app`, plus standalone LLM helpers:
+- `stacy_router` — classifies messages using `_ROUTER_PROMPTS[sensitivity]`
+- `hr_node` — answers policy questions
+- `report_node` — scores the violation as JSON `{"severity", "points", "violator"}`
+- `apply_infraction_node` — writes to DB via tool, generates Stacy's reply
+- `silent_ignore_node` — sentinel for ignored messages
+- `get_appeal_decision(username, context, severity, points, reason)` — reviews appeals, returns `{"decision", "points_removed", "message"}`
+- `get_pardon_response(member_name)` — LLM pardon message
+- `get_resolve_response(thread_name)` — LLM thread closing message
+- `get_forum_response(thread_name, conversation, directly_addressed)` — contextual forum reply
 
 ### `stacy_graph_tools.py`
-Defines `StacyState` (TypedDict) and DB write tools:
-- `StacyState` fields: `messages`, `user_id`, `guild_id`, `target_user_id`, `username`, `target_username`, `hr_policy`, `sensitivity`, `severity`, `points`, `participants`, `violator_name`
-- `lookup_hr_policy(guild_id, user_question)` — queries `guilds.hr_policy_text`
-- `warn_user` — Low severity, 0-point infraction
-- `upload_minor_infraction` — Medium severity infraction
-- `upload_severe_infraction` — Critical severity infraction
+- `StacyState` TypedDict: `messages`, `user_id`, `guild_id`, `target_user_id`, `username`, `target_username`, `hr_policy`, `sensitivity`, `severity`, `points`, `participants`, `violator_name`
+- `lookup_hr_policy` — queries `guilds.hr_policy_text`
+- `warn_user`, `upload_minor_infraction`, `upload_severe_infraction` — DB write tools
 
 ### `database_functions.py`
-All MySQL operations. Key functions:
-- `initialize_guild(guild_id, name, policy)` — upsert into `guilds`; ON DUPLICATE KEY only updates `guild_name`, never overwrites `hr_policy_text`
-- `upsert_user(user_id, guild_id, username)` — insert-or-update username
-- `log_stacy_inference(...)` — writes infraction row and increments score
-- `decay_scores_due() -> list[str]` — finds guilds due for decay, applies `GREATEST(0, score - decay_amount)`, updates `last_decay_at`, returns affected guild_ids
-- `get_guild_policy(guild_id)` / `update_guild_policy(guild_id, text)`
-- `get_guild_sensitivity(guild_id)` / `set_guild_sensitivity(guild_id, level)`
-- `set_decay_interval(guild_id, minutes)` / `set_decay_amount(guild_id, amount)`
-- `reset_user_score(user_id, guild_id)` — sets score to 0 (used by `!pardon`)
-- `get_pardon_response(member_name)` and `get_resolve_response(thread_name)` — standalone LLM calls in `stacy_graph.py` for commands that need Stacy's voice without the full LangGraph pipeline
-- `get_hr_report_data(user_id, guild_id)` — LEFT JOIN for report generation
-- `get_user_score(user_id, guild_id)` — returns current score integer
+All MySQL. Key functions:
+- `initialize_guild` — upsert guilds; never overwrites `hr_policy_text` on duplicate
+- `upsert_user` — insert-or-update username
+- `log_stacy_inference` — writes infraction, increments score
+- `decay_scores_due() -> list[str]` — applies decay to due guilds, returns affected guild_ids
+- `get_guild_policy` / `update_guild_policy`
+- `get_guild_sensitivity` / `set_guild_sensitivity`
+- `set_decay_interval` / `set_decay_amount`
+- `reset_user_score` — sets score to 0 (`!pardon`)
+- `deduct_user_score` — subtracts points floored at 0 (`!appeal` dismissal)
+- `get_latest_infraction` — most recent unappealed infraction for a user
+- `mark_infraction_appealed` — prevents the same infraction being appealed twice
+- `get_user_score`, `get_hr_report_data`
 
-DB credentials are hardcoded at the top in `db_config`. Update there if credentials change.
+DB credentials are hardcoded in `db_config` at the top of the file.
 
 ### `social_credit.py`
-Role management. Key functions:
-- `get_role_for_score(score)` — maps score integer to role name string
-- `sync_all_roles(guild)` — iterates all non-bot members, upserts them, assigns correct role
-- `setup_and_assign_hr_role(guild, member, score)` — single-member assignment used after an infraction or pardon
-
-Role thresholds live in `ROLE_THRESHOLDS` at the top of this file.
+- `ROLE_THRESHOLDS` — edit here to change score cutoffs
+- `sync_all_roles(guild)` — full role sync for all non-bot members
+- `setup_and_assign_hr_role(guild, member, score)` — single-member assignment
 
 ### `report.py`
-Pure HTML generation — takes data from `get_hr_report_data()` and builds a self-contained HTML file with Chart.js. No DB access of its own. Saved to `src/temp/`. Served by the FastAPI endpoint in `bot.py`.
+Pure HTML generation from `get_hr_report_data()`. Chart.js score graph + infraction table. Saved to `src/temp/`, served by FastAPI.
 
 ---
 
 ## Database Schema
 
 ```sql
-CREATE TABLE guilds (
+guilds (
     guild_id               VARCHAR(255) PRIMARY KEY,
     guild_name             VARCHAR(255),
     hr_policy_text         TEXT,
     decay_interval_minutes INT DEFAULT 1440,
     decay_amount           INT DEFAULT 5,
     last_decay_at          DATETIME DEFAULT NULL,
-    sensitivity            ENUM('low','medium','high') DEFAULT 'low',
-    created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
+    sensitivity            ENUM('low','medium','high') DEFAULT 'low'
+)
 
-CREATE TABLE users (
-    user_id             VARCHAR(255),
-    guild_id            VARCHAR(255),
-    username            VARCHAR(255),
-    social_credit_score INT DEFAULT 0,
-    current_status_role VARCHAR(100) DEFAULT 'HR Approved',
-    PRIMARY KEY (user_id, guild_id),
-    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id) ON DELETE CASCADE
-);
+users (
+    user_id              VARCHAR(255),
+    guild_id             VARCHAR(255),
+    username             VARCHAR(255),
+    social_credit_score  INT DEFAULT 0,
+    current_status_role  VARCHAR(100) DEFAULT 'HR Approved',
+    PRIMARY KEY (user_id, guild_id)
+)
 
-CREATE TABLE infractions (
-    infraction_id   INT AUTO_INCREMENT PRIMARY KEY,
-    guild_id        VARCHAR(255),
-    user_id         VARCHAR(255),
+infractions (
+    infraction_id     INT AUTO_INCREMENT PRIMARY KEY,
+    guild_id          VARCHAR(255),
+    user_id           VARCHAR(255),
     violation_context TEXT,
     stacy_inference   TEXT,
     severity_level    ENUM('Low','Medium','Critical'),
     score_penalty     INT,
-    timestamp         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (guild_id) REFERENCES guilds(guild_id),
-    FOREIGN KEY (user_id, guild_id) REFERENCES users(user_id, guild_id)
-);
+    appealed          BOOLEAN DEFAULT FALSE,
+    timestamp         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
 ```
 
 ---
@@ -180,66 +176,41 @@ CREATE TABLE infractions (
 
 ```env
 DISCORD_TOKEN=        # Discord bot token
-OPENAI_API_KEY=       # OpenAI API key (used by stacy_graph.py)
+OPENAI_API_KEY=       # OpenAI API key
 NGROK_AUTHTOKEN=      # ngrok auth token (free tier works)
 ```
-
-`GUILD_ID` and `USER_ID` were previously used only by `social_credit.py __main__` test block — no longer required.
 
 ---
 
 ## LLM Usage
 
-Uses **OpenAI `gpt-4o-mini`** via `langchain-openai`. Do not reintroduce Ollama — the OpenAI API is the intended runtime.
+Uses **OpenAI `gpt-4o-mini`** via `langchain-openai`. Do not reintroduce Ollama.
 
-Every passive message makes **1 LLM call** (the router). `report_violation` path makes **2 more** (report_node + apply_infraction_node). HR questions make **1 more** (hr_node). Cost is ~1 API call per message for normal chat.
+- Passive message: 1 LLM call (router)
+- Violation: 2 more calls (report_node + apply_infraction_node)
+- HR question: 1 more call (hr_node)
+- Forum message: 1 call (get_forum_response)
+- Appeal: 1 call (get_appeal_decision)
+- Pardon / resolve: 1 call each
 
 ---
 
 ## Stacy's Personality
 
-Stacy sounds like a sincere, slightly anxious HR representative who takes the rules very seriously. She:
-- Hedges frequently: "just", "technically", "from a consistency standpoint", "I don't want anyone getting mixed signals"
+Stacy sounds like a sincere, slightly anxious HR representative who takes the rules very seriously. Prompts describe personality traits — not example phrases — so responses vary naturally. Key traits:
+- Hedges and qualifies naturally ("just", "technically", "from a consistency standpoint")
 - Trails off with "…" or adds asides with dashes
-- Is apologetic about having to log things but does it anyway
-- Occasionally misreads the room and self-corrects
-- Is not punitive or robotic — she genuinely believes consistency makes things smoother for everyone
+- Apologetic about having to log things but does it anyway
+- Not punitive or robotic — genuinely believes consistency makes things smoother
+- In forum threads: more direct and engaged, reacts to what people actually say
 
-No emojis in any LLM-generated output. Prompts explicitly say "Do not use any emojis."
-
----
-
-## Planned Features
-
-- **`!appeal`** — user submits a written appeal against an infraction; Stacy reviews it via LLM and either upholds or dismisses it in character. A compelling appeal removes points. Needs an `appeals` DB table, a new LangGraph node or standalone LLM call, and an `!appeal <reason>` command that looks up the user's most recent infraction.
-- **Infraction streaks** — track flagging frequency per user; if a user is flagged X times within Y minutes, auto-escalate the next infraction regardless of individual severity. Needs a streak check in `apply_infraction_node` or `bot.py` using recent infraction timestamps from the DB. Thresholds should be configurable per guild.
-- **Good behaviour bonus** — after N days with no infractions, apply an accelerated decay multiplier to the user's score. Needs a `last_infraction_at` column on `users` and a check in `decay_scores_due()` to apply a bonus decay rate when the threshold is met.
-- **`!appeal`** — user submits a written appeal against an infraction; Stacy reviews it via LLM and either upholds or dismisses it in character. A compelling appeal removes points. Needs an `appeals` DB table, a new LangGraph node or standalone LLM call, and an `!appeal <reason>` command that looks up the user's most recent infraction.
-- **Infraction streaks** — track flagging frequency per user; if a user is flagged X times within Y minutes, auto-escalate the next infraction regardless of individual severity. Needs a streak check in `apply_infraction_node` or `bot.py` using recent infraction timestamps from the DB. Thresholds should be configurable per guild.
-- **Good behaviour bonus** — after N days with no infractions, apply an accelerated decay multiplier to the user's score. Needs a `last_infraction_at` column on `users` and a check in `decay_scores_due()` to apply a bonus decay rate when the threshold is met.
+No emojis in any LLM output. All prompts explicitly say "Do not use any emojis."
 
 ---
 
-## Known Issues / Gotchas
+## Known Gotchas
 
-- **Score is "social debt"** — higher score is *worse*. Zero is a clean record. Intentional for the HR theme.
-- **FastAPI + ngrok race condition** — if ngrok is slow to connect, `PUBLIC_URL` may not be set before the first report request. In practice this hasn't been an issue.
-- **`social_credit.py __main__` block** — standalone test runner, not used by the bot.
-
----
-
-## How to Run Locally
-
-```bash
-# 1. Start MySQL
-# 2. Apply schema
-mysql -u root -p < stacy_hr_db.sql
-# 3. Activate venv
-venv\Scripts\activate
-# 4. Set .env
-# 5. Run
-cd src
-python bot.py
-```
-
-The bot logs the ngrok report URL on startup. Keep that terminal open.
+- **Score is "social debt"** — higher is worse. Zero is a clean record. Intentional.
+- **FastAPI + ngrok** — `PUBLIC_URL` is set at startup. If ngrok is slow, the first report request may 404. Hasn't been an issue in practice.
+- **Forum thread buffers are in-memory** — if the bot restarts, `thread_buffers` and `thread_message_counts` reset. Stacy loses conversation context for open threads but continues to function.
+- **`!resolve` deletes threads** — there is no undo. The infraction record remains in the DB.
