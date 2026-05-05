@@ -133,6 +133,33 @@ async def decay_and_sync_job():
 # Helpers
 # ------------------
 
+async def _get_violations_forum(guild: discord.Guild) -> discord.ForumChannel:
+    existing = discord.utils.get(guild.channels, name="policy-violations")
+    if existing and isinstance(existing, discord.ForumChannel):
+        return existing
+    return await guild.create_forum(
+        name="policy-violations",
+        topic="Severe HR policy violations escalated by Stacy."
+    )
+
+
+async def _post_violation_thread(
+    guild: discord.Guild, target_name: str, pts: int, violation_msg: str
+):
+    try:
+        forum = await _get_violations_forum(guild)
+        content = (
+            f"**Incident Report — {target_name}**\n\n"
+            f"A severe policy violation has been escalated for formal review.\n\n"
+            f"**Points Added:** {pts}\n"
+            f"**Violation:**\n> {violation_msg[:800]}\n\n"
+            f"*This thread was opened automatically by Stacy HR.*"
+        )
+        await forum.create_thread(name=f"Incident — {target_name}", content=content)
+    except Exception as e:
+        print(f"❌ Failed to create violation thread: {e}")
+
+
 async def run_stacy(
     user_id: str,
     guild_id: str,
@@ -145,9 +172,10 @@ async def run_stacy(
     participants: dict | None = None,
     image_b64: str = "",
     image_mime: str = "",
-) -> str | None:
+) -> tuple[str | None, str | None, int]:
     """
-    Runs the Stacy LangGraph agent and returns the final response string, or None if ignored.
+    Runs the Stacy LangGraph agent. Returns (response_text, severity, points).
+    response_text is None if Stacy has nothing to say.
     Wrapped in asyncio.to_thread since LangGraph is synchronous.
     """
     if image_b64:
@@ -171,13 +199,19 @@ async def run_stacy(
     }
 
     def _run():
+        response_text = None
+        severity = None
+        points = 0
         for output in app.stream(inputs):
             for node_name, data in output.items():
+                if "severity" in data:
+                    severity = data.get("severity")
+                    points = int(data.get("points", 0))
                 if "messages" in data:
                     content = data["messages"][-1].content
                     if content != "[Stacy has no response for this message]":
-                        return content
-        return None
+                        response_text = content
+        return response_text, severity, points
 
     return await asyncio.to_thread(_run)
 
@@ -253,7 +287,7 @@ async def on_message(message):
             upsert_user(target_user_id, guild_id, target_username)
 
         async with message.channel.typing():
-            response = await run_stacy(
+            response, severity, pts = await run_stacy(
                 user_id, guild_id, target_user_id,
                 message.content, hr_policy,
                 _sensitivity_cache.get(guild_id, "low"),
@@ -264,7 +298,12 @@ async def on_message(message):
         if response:
             await message.reply(response[:1990])
 
-            # Immediately update the target's role after an infraction
+            if severity == "severe":
+                await _post_violation_thread(
+                    message.guild, target_username, pts,
+                    message.content or "[image]"
+                )
+
             try:
                 score = get_user_score(target_user_id, guild_id)
                 target_member = message.guild.get_member(int(target_user_id))
@@ -277,7 +316,7 @@ async def on_message(message):
         upsert_user(user_id, guild_id, message.author.display_name)
         display_name = message.author.display_name
 
-        response = await run_stacy(
+        response, severity, pts = await run_stacy(
             user_id=user_id,
             guild_id=guild_id,
             target_user_id=user_id,
@@ -292,6 +331,12 @@ async def on_message(message):
 
         if response:
             await message.reply(response[:1990])
+
+            if severity == "severe":
+                await _post_violation_thread(
+                    message.guild, display_name, pts,
+                    message.content or "[image]"
+                )
 
             try:
                 score = get_user_score(user_id, guild_id)

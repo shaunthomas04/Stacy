@@ -85,7 +85,9 @@ The main entrypoint. Owns:
 - All Discord event handlers (`on_ready`, `on_message`, `on_member_join`)
 - All `!commands`: `ping`, `hello`, `policy`, `stacyHelp`, `setPolicy`, `setSensitivity`, `setDecayInterval`, `setDecayAmount`, `pardon`, `history`
 - The APScheduler setup (`decay_and_sync_job` every 1 minute)
-- `run_stacy()` helper that wraps LangGraph in `asyncio.to_thread` (LangGraph is sync)
+- `run_stacy()` — wraps LangGraph in `asyncio.to_thread`, returns `(response_text, severity, points)`
+- `_get_violations_forum(guild)` — finds or creates the `policy-violations` forum channel
+- `_post_violation_thread(guild, target_name, pts, violation_msg)` — opens a new thread in the forum on severe infractions
 - In-memory caches: `_guild_cache` (policy strings), `_sensitivity_cache` (sensitivity strings)
 - `_ensure_guild(guild_id, guild_name)` — initialises guild in DB on first message, populates both caches
 
@@ -208,9 +210,12 @@ No emojis in any LLM-generated output. Prompts explicitly say "Do not use any em
 
 ## Planned Features
 
-- **Forum thread escalation** — on Critical infractions, open a Discord thread in a designated HR channel. Needs `!setHrChannel` command, a DB column for `hr_channel_id`, and thread-creation logic in `bot.py` after `upload_severe_infraction` fires.
-- **`!standings`** — leaderboard of top offenders in the server
-- **`!myRecord`** — let any user check their own current score and role tier
+- **`!appeal`** — user submits a written appeal against an infraction; Stacy reviews it via LLM and either upholds or dismisses it in character. A compelling appeal removes points. Needs an `appeals` DB table, a new LangGraph node or standalone LLM call, and an `!appeal <reason>` command that looks up the user's most recent infraction.
+- **Infraction streaks** — track flagging frequency per user; if a user is flagged X times within Y minutes, auto-escalate the next infraction regardless of individual severity. Needs a streak check in `apply_infraction_node` or `bot.py` using recent infraction timestamps from the DB. Thresholds should be configurable per guild.
+- **Good behaviour bonus** — after N days with no infractions, apply an accelerated decay multiplier to the user's score. Needs a `last_infraction_at` column on `users` and a check in `decay_scores_due()` to apply a bonus decay rate when the threshold is met.
+- **`!appeal`** — user submits a written appeal against an infraction; Stacy reviews it via LLM and either upholds or dismisses it in character. A compelling appeal removes points. Needs an `appeals` DB table, a new LangGraph node or standalone LLM call, and an `!appeal <reason>` command that looks up the user's most recent infraction.
+- **Infraction streaks** — track flagging frequency per user; if a user is flagged X times within Y minutes, auto-escalate the next infraction regardless of individual severity. Needs a streak check in `apply_infraction_node` or `bot.py` using recent infraction timestamps from the DB. Thresholds should be configurable per guild.
+- **Good behaviour bonus** — after N days with no infractions, apply an accelerated decay multiplier to the user's score. Needs a `last_infraction_at` column on `users` and a check in `decay_scores_due()` to apply a bonus decay rate when the threshold is met.
 
 ---
 

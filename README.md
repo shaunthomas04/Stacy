@@ -17,15 +17,16 @@ A Discord HR enforcement bot powered by LangGraph and the OpenAI API. Stacy pass
 | **Per-Guild Sensitivity** | Configurable moderation threshold: `low` (egregious violations only), `medium` (clear violations + persistent rudeness), `high` (flags borderline content). |
 | **`!history @user`** | Generates a styled HTML report (dark theme, Chart.js debt graph, infraction table) served via FastAPI + ngrok. |
 | **`!pardon @user`** | Owner-only. Clears a user's record and resets their score to 0. Stacy is reluctant about it but complies. |
+| **Forum thread escalation** | On Critical infractions, Stacy automatically finds or creates a `policy-violations` forum channel and opens a new incident thread with the violation details. |
 | **Multi-guild Support** | Each guild has its own policy, sensitivity, decay settings, users, and infractions — fully isolated. |
 
 ---
 
 ## Planned
 
-- **Forum thread escalation** — on Critical infractions, open a Discord forum thread in a designated HR channel (`!setHrChannel`)
-- **`!standings`** — leaderboard of top offenders in the server
-- **`!myRecord`** — let any user check their own current score and role tier
+- **`!appeal`** — user submits a written appeal against an infraction; Stacy reviews it via LLM and either upholds or dismisses it in character. A compelling appeal can result in points being removed.
+- **Infraction streaks** — if a user is flagged X times within Y minutes, Stacy automatically escalates regardless of individual severity. Configurable thresholds per guild.
+- **Good behaviour bonus** — after N days with no infractions, the user's score decays at an accelerated rate as a reward for staying clean.
 
 ---
 
