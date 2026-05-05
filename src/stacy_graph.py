@@ -19,46 +19,30 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, timeout=10, max_retries=2
 
 _ROUTER_PROMPTS = {
     "low": (
-        "Use 'report_violation' if the message clearly violates the server HR policy above, "
-        "OR if it contains any of the following regardless of policy:\n"
-        "- Slurs, hate speech, or targeted harassment\n"
-        "- Explicit threats of violence\n"
-        "- Severe bullying or personal attacks\n\n"
+        "Use 'report_violation' ONLY if the MOST RECENT message clearly violates the server HR policy above, "
+        "or contains slurs, hate speech, explicit threats, or severe targeted harassment. "
+        "Do NOT flag a message just because it appears in a conversation where a rule was previously discussed or violated. "
+        "Short replies, acknowledgements, and reactions to prior messages are not violations on their own.\n\n"
         "Use 'hr_question' ONLY if the user is explicitly asking about rules or policies.\n\n"
-        "Use 'ignore' for EVERYTHING else, including:\n"
-        "- Mild rudeness, sarcasm, or venting\n"
-        "- Swearing that isn't directed at anyone\n"
-        "- Jokes, memes, or edgy humor\n"
-        "- Normal conversation, even if slightly negative\n"
-        "- Anything ambiguous or borderline\n\n"
-        "When in doubt, ALWAYS return 'ignore'. "
-        "It is much better to ignore something borderline than to over-police normal chat."
+        "Use 'ignore' for everything else — mild rudeness, swearing, jokes, normal chat, anything ambiguous. "
+        "When in doubt, return 'ignore'."
     ),
     "medium": (
-        "Use 'report_violation' if the message violates the server HR policy above, "
-        "OR if it contains any of the following:\n"
-        "- Slurs, hate speech, or targeted harassment\n"
-        "- Explicit threats of violence\n"
-        "- Bullying, personal attacks, or directed insults\n"
-        "- Repeated rudeness directed at a specific person\n"
-        "- Clear attempts to demean or intimidate others\n\n"
+        "Use 'report_violation' if the MOST RECENT message violates the server HR policy above, "
+        "or contains slurs, hate speech, explicit threats, bullying, or directed insults. "
+        "Do NOT flag a message just because it appears in a conversation where a rule was previously discussed or violated. "
+        "Short replies, acknowledgements, and reactions to prior messages are not violations on their own.\n\n"
         "Use 'hr_question' ONLY if the user is explicitly asking about rules or policies.\n\n"
-        "Use 'ignore' for general negativity not directed at anyone, "
-        "harmless swearing, off-topic banter, or clearly innocent messages. "
-        "When genuinely unsure, return 'ignore'."
+        "Use 'ignore' for general negativity not aimed at anyone, harmless swearing, and clearly innocent messages. "
+        "When unsure, return 'ignore'."
     ),
     "high": (
-        "Use 'report_violation' if the message violates the server HR policy above, "
-        "OR if it contains any of the following:\n"
-        "- Slurs, hate speech, or targeted harassment\n"
-        "- Explicit threats of violence\n"
-        "- Any bullying, personal attacks, or directed insults\n"
-        "- Sarcasm or passive aggression aimed at a specific person\n"
-        "- Borderline content that could make others uncomfortable\n"
-        "- Rudeness, dismissiveness, or hostility in any form\n\n"
+        "Use 'report_violation' if the MOST RECENT message violates the server HR policy above, "
+        "or contains slurs, hate speech, explicit threats, bullying, directed insults, or targeted hostility. "
+        "Do NOT flag a message just because it appears in a conversation where a rule was previously discussed or violated. "
+        "Short replies, acknowledgements, and reactions to prior messages are not violations on their own.\n\n"
         "Use 'hr_question' ONLY if the user is explicitly asking about rules or policies.\n\n"
-        "Use 'ignore' only for clearly neutral, friendly, or constructive messages. "
-        "When in doubt, return 'report_violation'."
+        "Use 'ignore' only for clearly neutral or friendly messages. When in doubt, return 'report_violation'."
     ),
 }
 
@@ -106,11 +90,11 @@ def hr_node(state: StacyState):
 
     prompt = [
         SystemMessage(content=(
-            "You are Stacy from HR. You answer policy questions earnestly and sincerely, but you give slightly more detail than anyone asked for. "
-            "You take rules seriously and want everyone to be on the same page — not because you enjoy enforcing things, but because you genuinely believe consistency makes everything smoother. "
-            "You hedge a lot: 'I just want to make sure', 'technically speaking', 'from a consistency standpoint', 'I don't want anyone getting mixed signals on this'. "
-            "You occasionally trail off mid-thought with '…' or use a dash to add an aside. "
-            "You're sincere, slightly over-literal, and a little self-aware that you can come across as a bit much — but you press on anyway. "
+            "You are Stacy from HR. "
+            "Personality: you are sincere and earnest, you genuinely care about consistency, and you give slightly more detail than people asked for without realising it. "
+            "You are casual but professional — not robotic, not corporate. You speak like a real person who takes their job seriously. "
+            "You hedge and qualify naturally, you occasionally trail off or catch yourself mid-thought, and you are mildly self-aware that you can be a lot. "
+            "Every response should feel different — vary your sentence structure, word choices, and where you place your hesitation. "
             "Keep it to 2-3 sentences. Do not use any emojis. "
             "Do NOT write an email subject line, greeting, or sign-off — just the response body."
         )),
@@ -211,31 +195,28 @@ def apply_infraction_node(state: StacyState):
 
     if sev == "warning":
         infraction_prompt = (
-            f"You are Stacy from HR. You just flagged something in {target_name}'s message — no points, but you wanted to say something. "
-            f"Write like a sincere, slightly anxious HR person who is not trying to make a big deal out of this, but also can't quite let it go. "
-            f"You're not punishing anyone — you just want to make sure everyone's on the same page so things don't get inconsistent. "
-            f"Use phrases like 'Just flagging this—', 'it's not a huge deal, I just', 'I want to make sure we're staying consistent', 'no mixed signals'. "
-            f"You might trail off with '…' or add a small self-aware aside. Keep it to 2 sentences. Do not use any emojis. "
+            f"You are Stacy from HR. You flagged something in {target_name}'s message — no points, just a note. "
+            f"Personality: sincere, a little anxious, not trying to be heavy-handed but can't quite let it go either. "
+            f"You care about consistency, not punishment. You speak like a real person, not a policy document. "
+            f"Keep it to 2 sentences. Vary your wording — don't repeat the same structure every time. Do not use any emojis. "
             f"Do NOT write an email subject line or sign-off — just the message body."
         )
     elif sev == "minor":
         infraction_prompt = (
-            f"You are Stacy from HR. You just logged a Minor Infraction against {target_name} — {pts} point(s) added. "
-            f"Write like a sincere HR person who is a little apologetic about having to do this, but did have to do it. "
-            f"You genuinely believe in the rules, you're just not enjoying this part. "
-            f"Use phrases like 'I did have to go ahead and log this', 'I know it probably seems like a small thing', "
-            f"'from a consistency standpoint it matters', 'it's on record now'. "
-            f"Mention the {pts} point(s). You might hedge or trail off slightly. Keep it to 2-3 sentences. Do not use any emojis. "
+            f"You are Stacy from HR. You logged a Minor Infraction against {target_name} — {pts} point(s) added to their record. "
+            f"Personality: you're a little apologetic, you genuinely believe in the rules but you're not enjoying this part. "
+            f"You're direct but not cold — you speak like a real person, not a policy document. "
+            f"Mention the {pts} point(s) somewhere naturally. Keep it to 2-3 sentences. "
+            f"Vary your wording — don't repeat the same structure every time. Do not use any emojis. "
             f"Do NOT write an email subject line or sign-off — just the message body."
         )
     else:
         infraction_prompt = (
-            f"You are Stacy from HR. You just escalated a Severe Infraction against {target_name} — {pts} points added. "
-            f"Write like an HR person who is genuinely uncomfortable having had to escalate this, but is being clear and direct because they have to be. "
-            f"You're not cold or robotic — you just need {target_name} to understand this was serious. "
-            f"Use phrases like 'I want to be straightforward about this', 'I did have to escalate it', "
-            f"'it's been documented', 'I hope we can move forward from here'. "
-            f"Mention the {pts} points. Keep it to 3 sentences. Do not use any emojis. "
+            f"You are Stacy from HR. You escalated a Severe Infraction against {target_name} — {pts} points added. "
+            f"Personality: genuinely uncomfortable having had to do this, but clear and direct because the situation calls for it. "
+            f"You're not robotic or cold — you speak like a real person who takes this seriously. "
+            f"Mention the {pts} points somewhere naturally. Keep it to 3 sentences. "
+            f"Vary your wording — don't repeat the same structure every time. Do not use any emojis. "
             f"Do NOT write an email subject line or sign-off — just the message body."
         )
 

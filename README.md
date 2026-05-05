@@ -6,87 +6,26 @@ A Discord HR enforcement bot powered by LangGraph and the OpenAI API. Stacy pass
 
 ## Features
 
-### Working Now
-
 | Feature | Description |
 |---|---|
-| **Passive Moderation** | Every non-bot message is routed through LangGraph. Stacy ignores normal chat, answers HR questions when @mentioned, and files infractions for policy violations. |
+| **Passive Moderation** | Every non-bot message is evaluated via a sliding context window (last 10 messages per channel). Stacy ignores normal chat, answers HR questions when @mentioned, and files infractions for policy violations. |
 | **Infraction Logging** | Violations are written to MySQL with severity (Low / Medium / Critical), point penalty, context message, and Stacy's inference. |
-| **Social Credit Score** | Each user has a running score per guild. Points accumulate per infraction. Higher score = worse standing. |
-| **Role Assignment** | Stacy automatically assigns one of four HR roles based on score: `HR Approved`, `Under Review`, `Suspended Pay`, `Blacklisted`. Roles are created if they don't exist. |
-| **Cron Role Sync** | A scheduler runs every 5 minutes to sync all member roles against current DB scores. Roles are also updated immediately after any infraction. |
-| **!History @user** | Generates a styled HTML report (dark theme, Chart.js debt-over-time graph, infraction table) and serves it via FastAPI + ngrok. |
-| **Multi-guild Support** | Each guild has its own HR policy text, user records, and infractions — fully isolated. |
-
-### Planned / TODO
-
-#### 1. Custom HR Rules Upload
-Allow server admins to set their own HR policy rules via a Discord command instead of the current hardcoded string in `bot.py`. The policy is already stored in the `guilds` table — it just needs an update command and the `lookup_hr_policy` tool needs to query the DB instead of returning a hardcoded string.
-
-**Command:** `!SetPolicy <rules text>` (admin only)
-
-**What needs to change:**
-- Add `!SetPolicy` command in `bot.py` that calls `update_guild_policy(guild_id, text)` in `database_functions.py`
-- Rewrite `lookup_hr_policy` in `stacy_graph_tools.py` to `SELECT hr_policy_text FROM guilds WHERE guild_id = %s` using the `guild_id` from LangGraph state
-- Pass `guild_id` into the tool call in `hr_node` in `stacy_graph.py`
+| **Social Credit Score** | Each user has a running score per guild. Points accumulate per infraction. Higher score = worse standing. Score decays on a configurable schedule. |
+| **Role Assignment** | Stacy automatically assigns one of four HR roles based on score: `HR Approved`, `Under Review`, `Suspended Pay`, `Blacklisted`. Roles are created if they don't exist. Updated immediately after any infraction and on member join. |
+| **Score Decay** | Configurable automatic decay — removes N points from all users every M minutes. Defaults to 5 points every 24 hours. |
+| **Per-Guild Policy** | Each server has its own HR policy text stored in the DB. Set via `!setPolicy`. Stacy enforces custom rules alongside built-in defaults. |
+| **Per-Guild Sensitivity** | Configurable moderation threshold: `low` (egregious violations only), `medium` (clear violations + persistent rudeness), `high` (flags borderline content). |
+| **`!history @user`** | Generates a styled HTML report (dark theme, Chart.js debt graph, infraction table) served via FastAPI + ngrok. |
+| **`!pardon @user`** | Owner-only. Clears a user's record and resets their score to 0. Stacy is reluctant about it but complies. |
+| **Multi-guild Support** | Each guild has its own policy, sensitivity, decay settings, users, and infractions — fully isolated. |
 
 ---
 
-#### 2. Message Rolling Window (Passive Moderation Throttle)
-Currently every single message sent in the server triggers a full OpenAI API call through LangGraph. This is expensive and unnecessary — most messages are normal chat that the router will `ignore` anyway.
+## Planned
 
-**Proposed approach:** buffer the last N messages per channel in memory. Only run the LangGraph passive check when:
-- The buffer hits a configurable size (e.g. every 10 messages), OR
-- A message directly @mentions Stacy (always runs immediately regardless of buffer)
-
-The buffered messages are concatenated and passed as a single context block to the router, which scans them in bulk and returns a list of any violations found.
-
-**What needs to change:**
-- Add a `channel_buffers: dict[int, list[str]]` in `bot.py` keyed by `channel_id`
-- In `on_message`, append to the buffer instead of calling `run_stacy` immediately
-- When buffer hits threshold, call a new `run_stacy_bulk(messages, guild_id, ...)` function
-- `stacy_router` system prompt needs to be updated to handle a batch of messages and return a structured list of findings instead of a single keyword
-- @mention always bypasses the buffer and runs immediately
-
----
-
-#### 3. Per-Guild Sensitivity Parameter
-Right now the router's sensitivity is controlled entirely by prompt engineering — the same aggressive "when in doubt, ignore" instructions apply to all servers. Some servers may want Stacy to be more aggressive, others more relaxed.
-
-Store a `sensitivity` field in the `guilds` table (`low`, `medium`, `high`) and inject different router instructions based on the guild's setting.
-
-**Command:** `!SetSensitivity low|medium|high` (admin only)
-
-**Sensitivity behavior:**
-| Level | Behavior |
-|---|---|
-| `low` | Only flag egregious violations (slurs, threats). Ignore everything else. Current default behavior. |
-| `medium` | Flag clear violations and persistent rudeness. Issue soft warnings for borderline content. |
-| `high` | Flag borderline content, issue friendly reminders for mild violations, escalate repeated issues. |
-
-**What needs to change:**
-- Add `sensitivity ENUM('low','medium','high') DEFAULT 'low'` column to `guilds` table
-- Add `get_guild_sensitivity(guild_id)` and `set_guild_sensitivity(guild_id, level)` in `database_functions.py`
-- Add `!SetSensitivity` command in `bot.py`
-- Fetch sensitivity before calling `run_stacy` and pass it through the LangGraph state
-- `StacyState` in `stacy_graph_tools.py` needs a `sensitivity` field
-- `stacy_router` in `stacy_graph.py` switches between three different system prompts based on the value
-
----
-
-#### 4. Social Credit Score Decay
-The cron scheduler already runs every 5 minutes for role sync. Add a second scheduled job (daily or configurable) that applies a decay multiplier to all users' scores — "HR forgives but never forgets."
-
-**Proposed logic:** `new_score = max(0, floor(score * 0.95))` — 5% decay per day, score floors at 0.
-
-**What needs to change:**
-- Add `decay_scores()` to `database_functions.py`: `UPDATE users SET social_credit_score = GREATEST(0, FLOOR(social_credit_score * 0.95))`
-- Add a second `scheduler.add_job` in `on_ready` with `trigger='cron', hour=0` (midnight)
-
----
-
-#### 5. Forum Thread Escalation (Future)
-For Critical severity infractions, automatically create a Discord forum thread in a designated HR channel for open discussion. The `upload_severe_infraction` tool already marks these — it just needs the actual `guild.create_thread()` call wired in.
+- **Forum thread escalation** — on Critical infractions, open a Discord forum thread in a designated HR channel (`!setHrChannel`)
+- **`!standings`** — leaderboard of top offenders in the server
+- **`!myRecord`** — let any user check their own current score and role tier
 
 ---
 
@@ -96,7 +35,7 @@ For Critical severity infractions, automatically create a Discord forum thread i
 |---|---|
 | **Bot Framework** | `discord.py` (`discord` + `commands.Bot`) |
 | **AI Agent** | LangGraph (`langgraph`) with OpenAI (`langchain-openai`) |
-| **LLM** | OpenAI `gpt-4o-mini` — cheap, fast, solid tool-use support |
+| **LLM** | OpenAI `gpt-4o-mini` |
 | **Database** | MySQL via `mysql-connector-python` |
 | **Report Server** | FastAPI + uvicorn, tunneled via pyngrok |
 | **Scheduler** | APScheduler (`apscheduler`) |
@@ -130,10 +69,11 @@ pip install -r requirements.txt
 ```
 
 ### 3. Set up the database
-Run the SQL schema file against your MySQL instance:
 ```bash
 mysql -u root -p < stacy_hr_db.sql
 ```
+
+If upgrading an existing install, run the ALTER TABLE statements in `stacy_hr_db.sql` comments for any columns added after initial setup.
 
 ### 4. Configure environment variables
 Create a `.env` file in the project root:
@@ -141,8 +81,6 @@ Create a `.env` file in the project root:
 DISCORD_TOKEN=your_discord_bot_token
 OPENAI_API_KEY=your_openai_api_key
 NGROK_AUTHTOKEN=your_ngrok_auth_token
-GUILD_ID=your_discord_guild_id
-USER_ID=your_discord_user_id
 ```
 
 ### 5. Run the bot
@@ -151,7 +89,7 @@ cd src
 python bot.py
 ```
 
-The bot will print the ngrok URL where reports are served on startup.
+The bot prints the ngrok report URL on startup.
 
 ### Invite the Bot
 ```
@@ -162,25 +100,59 @@ https://discord.com/oauth2/authorize?client_id=1449588724265521154&scope=bot&per
 
 ## Commands
 
+### General
 | Command | Description |
 |---|---|
-| `!ping` | Health check — responds with Pong |
-| `!hello` | Greet HR |
-| `!rules` | Print the default HR guidelines |
-| `!helpme` | List all commands |
-| `!History @user` | Generate and serve an HTML HR report for the user |
+| `!stacyHelp` | Show the command menu |
+| `!policy` | View this server's current HR policy |
+| `!history @user` | Generate and serve an HTML HR report |
+| `!ping` | Health check |
 | `@Stacy <question>` | Ask Stacy an HR policy question |
-| `@Stacy @user <reason>` | Report a user to Stacy for a violation |
+| `@Stacy @user <reason>` | Report a user to Stacy |
+
+### Server Owner Only
+| Command | Description |
+|---|---|
+| `!setPolicy <text>` | Update the server's HR policy |
+| `!setSensitivity <low\|medium\|high>` | Set moderation threshold (default: `low`) |
+| `!setDecayInterval <minutes>` | How often scores decay (default: 1440) |
+| `!setDecayAmount <points>` | Points removed per decay tick (default: 5) |
+| `!pardon @user` | Clear a user's record and reset score to 0 |
 
 ---
 
-## Database Schema (summary)
+## Database Schema
 
 ```sql
-guilds      (guild_id PK, guild_name, hr_policy_text)
-users       (user_id, guild_id, username, social_credit_score, current_status_role)
-infractions (infraction_id, guild_id, user_id, violation_context, stacy_inference,
-             severity_level, score_penalty, timestamp)
+guilds (
+    guild_id              VARCHAR(255) PRIMARY KEY,
+    guild_name            VARCHAR(255),
+    hr_policy_text        TEXT,
+    decay_interval_minutes INT DEFAULT 1440,
+    decay_amount          INT DEFAULT 5,
+    last_decay_at         DATETIME DEFAULT NULL,
+    sensitivity           ENUM('low','medium','high') DEFAULT 'low'
+)
+
+users (
+    user_id              VARCHAR(255),
+    guild_id             VARCHAR(255),
+    username             VARCHAR(255),
+    social_credit_score  INT DEFAULT 0,
+    current_status_role  VARCHAR(100) DEFAULT 'HR Approved',
+    PRIMARY KEY (user_id, guild_id)
+)
+
+infractions (
+    infraction_id    INT AUTO_INCREMENT PRIMARY KEY,
+    guild_id         VARCHAR(255),
+    user_id          VARCHAR(255),
+    violation_context TEXT,
+    stacy_inference   TEXT,
+    severity_level    ENUM('Low','Medium','Critical'),
+    score_penalty     INT,
+    timestamp         TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
 ```
 
 ---
@@ -193,3 +165,5 @@ infractions (infraction_id, guild_id, user_id, violation_context, stacy_inferenc
 | 1–5 | Under Review |
 | 6–15 | Suspended Pay |
 | 16+ | Blacklisted |
+
+Thresholds are defined in `ROLE_THRESHOLDS` at the top of `src/social_credit.py`.

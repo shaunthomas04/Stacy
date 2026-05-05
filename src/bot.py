@@ -3,7 +3,6 @@ import asyncio
 import logging
 import threading
 import base64
-from collections import deque
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
@@ -21,6 +20,7 @@ from database_functions import (
     get_guild_policy, update_guild_policy,
     set_decay_interval, set_decay_amount, decay_scores_due,
     get_guild_sensitivity, set_guild_sensitivity,
+    reset_user_score,
 )
 from report import generate_hr_report
 from social_credit import sync_all_roles, setup_and_assign_hr_role
@@ -94,12 +94,6 @@ DEFAULT_POLICY = (
 _guild_cache: dict[str, str] = {}
 # guild_id -> sensitivity string ('low', 'medium', 'high')
 _sensitivity_cache: dict[str, str] = {}
-
-# Sliding window: keeps the last CONTEXT_SIZE messages per channel as conversation
-# context for every LLM call. Stacy evaluates every message but always sees
-# surrounding conversation so she can detect escalating patterns.
-CONTEXT_SIZE = 10
-channel_buffers: dict[int, deque] = {}  # channel_id -> deque of (user_id, display_name, content)
 
 
 def _ensure_guild(guild_id: str, guild_name: str) -> str:
@@ -281,45 +275,31 @@ async def on_message(message):
 
     else:
         upsert_user(user_id, guild_id, message.author.display_name)
-
-        channel_id = message.channel.id
         display_name = message.author.display_name
-        content = message.content or "[image]"
-
-        # Maintain sliding window per channel
-        if channel_id not in channel_buffers:
-            channel_buffers[channel_id] = deque(maxlen=CONTEXT_SIZE)
-        channel_buffers[channel_id].append((user_id, display_name, content))
-
-        # Build conversation context and participants from current window
-        window = list(channel_buffers[channel_id])
-        participants = {name: uid for uid, name, _ in window}
-        conversation = "\n".join(f"{name}: {msg}" for _, name, msg in window)
 
         response = await run_stacy(
             user_id=user_id,
             guild_id=guild_id,
             target_user_id=user_id,
-            message_content=f"[CONVERSATION CONTEXT]\n{conversation}",
+            message_content=message.content or "[image]",
             hr_policy=hr_policy,
             sensitivity=_sensitivity_cache.get(guild_id, "low"),
             username=display_name,
             target_username=display_name,
-            participants=participants,
+            image_b64=image_b64,
+            image_mime=image_mime,
         )
 
         if response:
             await message.reply(response[:1990])
 
-            # Update roles for everyone visible in the current window
-            for p_uid in participants.values():
-                try:
-                    score = get_user_score(p_uid, guild_id)
-                    member = message.guild.get_member(int(p_uid))
-                    if member:
-                        await setup_and_assign_hr_role(message.guild, member, score)
-                except Exception as e:
-                    print(f"❌ Role update failed after infraction: {e}")
+            try:
+                score = get_user_score(user_id, guild_id)
+                member = message.guild.get_member(int(user_id))
+                if member:
+                    await setup_and_assign_hr_role(message.guild, member, score)
+            except Exception as e:
+                print(f"❌ Role update failed after infraction: {e}")
 
 
 # ------------------
@@ -336,8 +316,8 @@ async def hello(ctx):
     await ctx.send(f"Hello {ctx.author.mention}, HR acknowledges your presence. 👔")
 
 
-@bot.command(name="rules")
-async def rules(ctx):
+@bot.command(name="policy")
+async def policy(ctx):
     policy = get_guild_policy(str(ctx.guild.id)) or DEFAULT_POLICY
     await ctx.send(f"**📋 {ctx.guild.name} HR Policy:**\n{policy}")
 
@@ -349,13 +329,14 @@ async def stacy_help(ctx):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "📋 **GENERAL**\n"
         "`!stacyHelp` — Show this menu\n"
-        "`!rules` — View this server's HR policy\n"
+        "`!policy` — View this server's HR policy\n"
         "`!history @user` — Pull up a user's HR report\n\n"
         "🔒 **SERVER OWNER ONLY**\n"
         "`!setPolicy <text>` — Update the server's HR rules\n"
         "`!setSensitivity <low|medium|high>` — Set how strictly Stacy enforces policy *(default: low)*\n"
         "`!setDecayInterval <minutes>` — How often scores decay *(default: 1440 min)*\n"
-        "`!setDecayAmount <points>` — Points removed per decay tick *(default: 5)*\n\n"
+        "`!setDecayAmount <points>` — Points removed per decay tick *(default: 5)*\n"
+        "`!pardon @user` — Clear a user's record and reset their score to 0\n\n"
         "👀 **PASSIVE MODERATION**\n"
         "Stacy reads every message and enforces server policy automatically.\n"
         "`@Stacy <question>` — Ask Stacy about HR rules\n"
@@ -415,6 +396,29 @@ async def set_sensitivity_cmd(ctx, level: str = None):
     set_guild_sensitivity(guild_id, level)
     _sensitivity_cache[guild_id] = level
     await ctx.send(f"Sensitivity updated to **{level}**. Stacy will now enforce policy at the **{level}** threshold.")
+
+
+@bot.command(name="pardon")
+async def pardon(ctx, member: discord.Member = None):
+    if ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("Only server owners can issue pardons.")
+        return
+    if not member:
+        await ctx.send("Usage: `!pardon @user`")
+        return
+    guild_id = str(ctx.guild.id)
+    user_id = str(member.id)
+    reset_user_score(user_id, guild_id)
+    try:
+        await setup_and_assign_hr_role(ctx.guild, member, 0)
+    except Exception as e:
+        print(f"❌ Role reset failed for {member.display_name}: {e}")
+    await ctx.send(
+        f"I've been asked to process a full pardon for {member.display_name}. "
+        f"Their record has been cleared and their standing reset to HR Approved. "
+        f"I do want to note — just for the record — that I had some reservations about this, "
+        f"but it's not my call. Fresh start, I guess."
+    )
 
 
 @bot.command(name="history")

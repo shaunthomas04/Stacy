@@ -246,6 +246,25 @@ def log_stacy_inference(user_id, guild_id, message, inference, severity, penalty
         cursor.close()
         conn.close()
 
+def reset_user_score(user_id: str, guild_id: str):
+    """Resets a user's social credit score to 0 (full pardon)."""
+    conn = get_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE users SET social_credit_score = 0 WHERE user_id = %s AND guild_id = %s",
+            (str(user_id), str(guild_id))
+        )
+        conn.commit()
+    except Error as e:
+        print(f"Error resetting user score: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def get_hr_report_data(user_id, guild_id):
     """Fetches data needed for your !HRReport HTML generation."""
     conn = get_connection()
