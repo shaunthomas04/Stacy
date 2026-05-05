@@ -13,8 +13,11 @@ class StacyState(TypedDict):
     username: str
     target_username: str
     hr_policy: str
+    sensitivity: str
     severity: str
     points: int
+    participants: dict   # display_name -> user_id, set for batch/conversation messages
+    violator_name: str   # filled by report_node when processing a batch
 
 # 4. TOOLS
 @tool

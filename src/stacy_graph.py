@@ -17,13 +17,8 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, timeout=10, max_retries=2
 
 # NODES
 
-def stacy_router(state: StacyState):
-    hr_policy = state.get("hr_policy", "")
-    policy_block = f"\n\nThis server's HR policy:\n{hr_policy}" if hr_policy else ""
-
-    system_prompt = (
-        f"You are an HR routing system. Analyze the message and return ONLY ONE WORD.\n"
-        f"Keywords: 'ignore', 'hr_question', 'report_violation'.{policy_block}\n\n"
+_ROUTER_PROMPTS = {
+    "low": (
         "Use 'report_violation' if the message clearly violates the server HR policy above, "
         "OR if it contains any of the following regardless of policy:\n"
         "- Slurs, hate speech, or targeted harassment\n"
@@ -38,6 +33,46 @@ def stacy_router(state: StacyState):
         "- Anything ambiguous or borderline\n\n"
         "When in doubt, ALWAYS return 'ignore'. "
         "It is much better to ignore something borderline than to over-police normal chat."
+    ),
+    "medium": (
+        "Use 'report_violation' if the message violates the server HR policy above, "
+        "OR if it contains any of the following:\n"
+        "- Slurs, hate speech, or targeted harassment\n"
+        "- Explicit threats of violence\n"
+        "- Bullying, personal attacks, or directed insults\n"
+        "- Repeated rudeness directed at a specific person\n"
+        "- Clear attempts to demean or intimidate others\n\n"
+        "Use 'hr_question' ONLY if the user is explicitly asking about rules or policies.\n\n"
+        "Use 'ignore' for general negativity not directed at anyone, "
+        "harmless swearing, off-topic banter, or clearly innocent messages. "
+        "When genuinely unsure, return 'ignore'."
+    ),
+    "high": (
+        "Use 'report_violation' if the message violates the server HR policy above, "
+        "OR if it contains any of the following:\n"
+        "- Slurs, hate speech, or targeted harassment\n"
+        "- Explicit threats of violence\n"
+        "- Any bullying, personal attacks, or directed insults\n"
+        "- Sarcasm or passive aggression aimed at a specific person\n"
+        "- Borderline content that could make others uncomfortable\n"
+        "- Rudeness, dismissiveness, or hostility in any form\n\n"
+        "Use 'hr_question' ONLY if the user is explicitly asking about rules or policies.\n\n"
+        "Use 'ignore' only for clearly neutral, friendly, or constructive messages. "
+        "When in doubt, return 'report_violation'."
+    ),
+}
+
+
+def stacy_router(state: StacyState):
+    hr_policy = state.get("hr_policy", "")
+    sensitivity = state.get("sensitivity", "low")
+    policy_block = f"\n\nThis server's HR policy:\n{hr_policy}" if hr_policy else ""
+    rules = _ROUTER_PROMPTS.get(sensitivity, _ROUTER_PROMPTS["low"])
+
+    system_prompt = (
+        f"You are an HR routing system. Analyze the message and return ONLY ONE WORD.\n"
+        f"Keywords: 'ignore', 'hr_question', 'report_violation'.{policy_block}\n\n"
+        f"{rules}"
     )
 
     try:
@@ -70,10 +105,17 @@ def hr_node(state: StacyState):
     })
 
     prompt = [
-        SystemMessage(content="You are Stacy, a helpful but slightly sassy HR bot. "
-                              "Explain this policy to the user in a friendly way."),
+        SystemMessage(content=(
+            "You are Stacy from HR. You answer policy questions earnestly and sincerely, but you give slightly more detail than anyone asked for. "
+            "You take rules seriously and want everyone to be on the same page — not because you enjoy enforcing things, but because you genuinely believe consistency makes everything smoother. "
+            "You hedge a lot: 'I just want to make sure', 'technically speaking', 'from a consistency standpoint', 'I don't want anyone getting mixed signals on this'. "
+            "You occasionally trail off mid-thought with '…' or use a dash to add an aside. "
+            "You're sincere, slightly over-literal, and a little self-aware that you can come across as a bit much — but you press on anyway. "
+            "Keep it to 2-3 sentences. Do not use any emojis. "
+            "Do NOT write an email subject line, greeting, or sign-off — just the response body."
+        )),
         state["messages"][-1],
-        HumanMessage(content=f"Context from HR Handbook: {policy_text}")
+        HumanMessage(content=f"Relevant policy: {policy_text}")
     ]
 
     response = llm.invoke(prompt)
@@ -83,24 +125,38 @@ def hr_node(state: StacyState):
 def report_node(state: StacyState):
     last_msg = _text(state["messages"][-1]) or "[image]"
     hr_policy = state.get("hr_policy", "")
-    policy_block = f"\n\nThis server's HR policy (use this to calibrate severity):\n{hr_policy}" if hr_policy else ""
+    participants = state.get("participants") or {}
+    is_batch = bool(participants)
 
-    system_prompt = f"""You are Stacy, an HR enforcement bot. Analyze this message and return ONLY a JSON object.{policy_block}
+    policy_block = f"\n\nThis server's HR policy:\n{hr_policy}" if hr_policy else ""
 
-    {{"severity": "warning", "points": 0}}
+    if is_batch:
+        names = ", ".join(participants.keys())
+        format_example = f'{{"severity": "warning", "points": 0, "violator": "<one of: {names}>"}}'
+        context = (
+            "You are reviewing a conversation log. Identify which participant (if any) "
+            "violated policy and include their exact display name in the 'violator' field."
+        )
+    else:
+        format_example = '{"severity": "warning", "points": 0}'
+        context = "You are reviewing a single message."
 
-    Rules — be CONSERVATIVE, most messages should not reach you at all:
-    - "warning" (0 points): Borderline content, mild directed insults, first offense tone issues
+    system_prompt = f"""You are Stacy, an HR enforcement bot. {context}{policy_block}
+
+    Return ONLY a JSON object: {format_example}
+
+    Rules — be CONSERVATIVE:
+    - "warning" (0 points): Borderline content, mild directed insults, first offense tone
     - "minor" (1-3 points): Clear policy violations, repeated targeted rudeness, low-grade slurs
-    - "severe" (4-10 points): Explicit hate speech, slurs directed at a person or group, threats, serious harassment
+    - "severe" (4-10 points): Explicit hate speech, slurs, threats, serious harassment
 
-    If the message violates a specific rule in the server HR policy above, treat it as at least "minor".
-    Only assign "severe" for things that would get someone banned in any normal server.
-    Default to "warning" if you are unsure. Return ONLY the JSON, no explanation."""
+    Consider conversation context — escalating patterns are more severe than isolated messages.
+    If the content violates a specific server HR rule, treat it as at least "minor".
+    Default to "warning" if unsure. Return ONLY the JSON, no explanation."""
 
     response = llm.invoke([
         SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Message to evaluate: {last_msg}")
+        HumanMessage(content=f"Content to evaluate:\n{last_msg}")
     ])
 
     try:
@@ -108,23 +164,34 @@ def report_node(state: StacyState):
         result = json.loads(clean)
         severity = result.get("severity", "warning")
         points = int(result.get("points", 0))
+        violator_name = result.get("violator", "")
     except (json.JSONDecodeError, ValueError):
         severity = "warning"
         points = 0
+        violator_name = ""
 
-    return {"severity": severity, "points": points}
-    # target_user_id already in state — no need to touch it
+    return {"severity": severity, "points": points, "violator_name": violator_name}
 
 
 def apply_infraction_node(state: StacyState):
     sev = state.get("severity", "warning")
     uid = state.get("user_id", "UnknownUser")
-    target = state.get("target_user_id", uid)
-    reporter_name = state.get("username", uid)
-    target_name = state.get("target_username", target)
     gid = state.get("guild_id", "UnknownGuild")
     pts = state.get("points", 0)
     last_msg = _text(state["messages"][-1]) or "[image only]"
+
+    participants = state.get("participants") or {}
+    violator_name = state.get("violator_name", "")
+
+    # Batch mode: resolve the violating user from the participants map
+    if participants and violator_name and violator_name in participants:
+        target = participants[violator_name]
+        target_name = violator_name
+        reporter_name = "the server"
+    else:
+        target = state.get("target_user_id", uid)
+        target_name = state.get("target_username", target)
+        reporter_name = state.get("username", uid)
 
     if sev == "warning":
         action_taken = "issued a formal warning (0 points)"
@@ -142,12 +209,35 @@ def apply_infraction_node(state: StacyState):
             "user_id": target, "guild_id": gid, "message": last_msg, "points": pts
         })
 
-    infraction_prompt = (
-        f"You are Stacy, a strict but professional HR bot. You just {action_taken} "
-        f"against {target_name}. Tell {reporter_name} (who {'reported this' if target != uid else 'did this'}) "
-        f"what happened and that {pts} points were added to {target_name}'s record. "
-        f"Use a {'gentle' if sev == 'warning' else 'stern'} tone. Include emojis."
-    )
+    if sev == "warning":
+        infraction_prompt = (
+            f"You are Stacy from HR. You just flagged something in {target_name}'s message — no points, but you wanted to say something. "
+            f"Write like a sincere, slightly anxious HR person who is not trying to make a big deal out of this, but also can't quite let it go. "
+            f"You're not punishing anyone — you just want to make sure everyone's on the same page so things don't get inconsistent. "
+            f"Use phrases like 'Just flagging this—', 'it's not a huge deal, I just', 'I want to make sure we're staying consistent', 'no mixed signals'. "
+            f"You might trail off with '…' or add a small self-aware aside. Keep it to 2 sentences. Do not use any emojis. "
+            f"Do NOT write an email subject line or sign-off — just the message body."
+        )
+    elif sev == "minor":
+        infraction_prompt = (
+            f"You are Stacy from HR. You just logged a Minor Infraction against {target_name} — {pts} point(s) added. "
+            f"Write like a sincere HR person who is a little apologetic about having to do this, but did have to do it. "
+            f"You genuinely believe in the rules, you're just not enjoying this part. "
+            f"Use phrases like 'I did have to go ahead and log this', 'I know it probably seems like a small thing', "
+            f"'from a consistency standpoint it matters', 'it's on record now'. "
+            f"Mention the {pts} point(s). You might hedge or trail off slightly. Keep it to 2-3 sentences. Do not use any emojis. "
+            f"Do NOT write an email subject line or sign-off — just the message body."
+        )
+    else:
+        infraction_prompt = (
+            f"You are Stacy from HR. You just escalated a Severe Infraction against {target_name} — {pts} points added. "
+            f"Write like an HR person who is genuinely uncomfortable having had to escalate this, but is being clear and direct because they have to be. "
+            f"You're not cold or robotic — you just need {target_name} to understand this was serious. "
+            f"Use phrases like 'I want to be straightforward about this', 'I did have to escalate it', "
+            f"'it's been documented', 'I hope we can move forward from here'. "
+            f"Mention the {pts} points. Keep it to 3 sentences. Do not use any emojis. "
+            f"Do NOT write an email subject line or sign-off — just the message body."
+        )
 
     response = llm.invoke([SystemMessage(content=infraction_prompt)] + state["messages"])
     return {"messages": [response]}

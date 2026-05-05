@@ -137,6 +137,43 @@ def get_guild_policy(guild_id: str) -> str:
         conn.close()
 
 
+def get_guild_sensitivity(guild_id: str) -> str:
+    """Returns the sensitivity setting for a guild ('low', 'medium', 'high'). Defaults to 'low'."""
+    conn = get_connection()
+    if not conn:
+        return "low"
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT sensitivity FROM guilds WHERE guild_id = %s", (str(guild_id),))
+        row = cursor.fetchone()
+        return row[0] if row else "low"
+    except Error as e:
+        print(f"Error fetching guild sensitivity: {e}")
+        return "low"
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def set_guild_sensitivity(guild_id: str, sensitivity: str):
+    """Updates the moderation sensitivity level for a guild."""
+    conn = get_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE guilds SET sensitivity = %s WHERE guild_id = %s",
+            (sensitivity, str(guild_id))
+        )
+        conn.commit()
+    except Error as e:
+        print(f"Error setting guild sensitivity: {e}")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def update_guild_policy(guild_id: str, policy_text: str):
     """Overwrites the HR policy for a guild."""
     conn = get_connection()

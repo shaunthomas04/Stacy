@@ -11,8 +11,10 @@ CREATE TABLE IF NOT EXISTS guilds (
     decay_interval_minutes INT DEFAULT 1440,
     decay_amount          INT DEFAULT 5,
     last_decay_at         DATETIME DEFAULT NULL,
+    sensitivity           ENUM('low', 'medium', 'high') DEFAULT 'low',
     created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+-- For existing installs: ALTER TABLE guilds ADD COLUMN sensitivity ENUM('low','medium','high') DEFAULT 'low';
 
 -- 2. Users Table
 -- Tracking the social standing and current "pay" status

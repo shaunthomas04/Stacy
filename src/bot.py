@@ -3,6 +3,7 @@ import asyncio
 import logging
 import threading
 import base64
+from collections import deque
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
@@ -19,6 +20,7 @@ from database_functions import (
     upsert_user, initialize_guild, get_user_score,
     get_guild_policy, update_guild_policy,
     set_decay_interval, set_decay_amount, decay_scores_due,
+    get_guild_sensitivity, set_guild_sensitivity,
 )
 from report import generate_hr_report
 from social_credit import sync_all_roles, setup_and_assign_hr_role
@@ -89,20 +91,27 @@ DEFAULT_POLICY = (
 )
 
 # guild_id -> hr_policy string
-# Populated on first message from each guild, invalidated on !SetPolicy.
-# Eliminates 2 DB hits (initialize_guild + get_guild_policy) on every message.
 _guild_cache: dict[str, str] = {}
+# guild_id -> sensitivity string ('low', 'medium', 'high')
+_sensitivity_cache: dict[str, str] = {}
+
+# Sliding window: keeps the last CONTEXT_SIZE messages per channel as conversation
+# context for every LLM call. Stacy evaluates every message but always sees
+# surrounding conversation so she can detect escalating patterns.
+CONTEXT_SIZE = 10
+channel_buffers: dict[int, deque] = {}  # channel_id -> deque of (user_id, display_name, content)
 
 
 def _ensure_guild(guild_id: str, guild_name: str) -> str:
     """
     Returns the guild's HR policy. On first call for a guild: writes the row to
-    DB if it doesn't exist, fetches the stored policy, and caches it.
-    Subsequent calls return the cached value with zero DB hits.
+    DB if it doesn't exist, fetches the stored policy and sensitivity, and caches both.
+    Subsequent calls return the cached values with zero DB hits.
     """
     if guild_id not in _guild_cache:
         initialize_guild(guild_id, guild_name, DEFAULT_POLICY)
         _guild_cache[guild_id] = get_guild_policy(guild_id) or DEFAULT_POLICY
+        _sensitivity_cache[guild_id] = get_guild_sensitivity(guild_id)
     return _guild_cache[guild_id]
 
 
@@ -136,8 +145,10 @@ async def run_stacy(
     target_user_id: str,
     message_content: str,
     hr_policy: str = "",
+    sensitivity: str = "low",
     username: str = "",
     target_username: str = "",
+    participants: dict | None = None,
     image_b64: str = "",
     image_mime: str = "",
 ) -> str | None:
@@ -159,8 +170,10 @@ async def run_stacy(
         "guild_id": guild_id,
         "target_user_id": target_user_id,
         "hr_policy": hr_policy,
+        "sensitivity": sensitivity,
         "username": username,
         "target_username": target_username,
+        "participants": participants or {},
     }
 
     def _run():
@@ -194,6 +207,16 @@ async def on_ready():
     for guild in bot.guilds:
         _ensure_guild(str(guild.id), guild.name)
         await sync_all_roles(guild)
+
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild_id = str(member.guild.id)
+    upsert_user(str(member.id), guild_id, member.display_name)
+    try:
+        await setup_and_assign_hr_role(member.guild, member, 0)
+    except Exception as e:
+        print(f"❌ Role assignment failed for new member {member.display_name}: {e}")
 
 
 @bot.event
@@ -239,8 +262,9 @@ async def on_message(message):
             response = await run_stacy(
                 user_id, guild_id, target_user_id,
                 message.content, hr_policy,
+                _sensitivity_cache.get(guild_id, "low"),
                 message.author.display_name, target_username,
-                image_b64, image_mime
+                image_b64=image_b64, image_mime=image_mime,
             )
 
         if response:
@@ -258,22 +282,44 @@ async def on_message(message):
     else:
         upsert_user(user_id, guild_id, message.author.display_name)
 
+        channel_id = message.channel.id
+        display_name = message.author.display_name
+        content = message.content or "[image]"
+
+        # Maintain sliding window per channel
+        if channel_id not in channel_buffers:
+            channel_buffers[channel_id] = deque(maxlen=CONTEXT_SIZE)
+        channel_buffers[channel_id].append((user_id, display_name, content))
+
+        # Build conversation context and participants from current window
+        window = list(channel_buffers[channel_id])
+        participants = {name: uid for uid, name, _ in window}
+        conversation = "\n".join(f"{name}: {msg}" for _, name, msg in window)
+
         response = await run_stacy(
-            user_id, guild_id, user_id,
-            message.content, hr_policy,
-            message.author.display_name, message.author.display_name,
-            image_b64, image_mime
+            user_id=user_id,
+            guild_id=guild_id,
+            target_user_id=user_id,
+            message_content=f"[CONVERSATION CONTEXT]\n{conversation}",
+            hr_policy=hr_policy,
+            sensitivity=_sensitivity_cache.get(guild_id, "low"),
+            username=display_name,
+            target_username=display_name,
+            participants=participants,
         )
 
         if response:
             await message.reply(response[:1990])
 
-            # Immediately update the sender's role after a self-violation
-            try:
-                score = get_user_score(user_id, guild_id)
-                await setup_and_assign_hr_role(message.guild, message.author, score)
-            except Exception as e:
-                print(f"❌ Role update failed after self-violation: {e}")
+            # Update roles for everyone visible in the current window
+            for p_uid in participants.values():
+                try:
+                    score = get_user_score(p_uid, guild_id)
+                    member = message.guild.get_member(int(p_uid))
+                    if member:
+                        await setup_and_assign_hr_role(message.guild, member, score)
+                except Exception as e:
+                    print(f"❌ Role update failed after infraction: {e}")
 
 
 # ------------------
@@ -307,6 +353,7 @@ async def stacy_help(ctx):
         "`!history @user` — Pull up a user's HR report\n\n"
         "🔒 **SERVER OWNER ONLY**\n"
         "`!setPolicy <text>` — Update the server's HR rules\n"
+        "`!setSensitivity <low|medium|high>` — Set how strictly Stacy enforces policy *(default: low)*\n"
         "`!setDecayInterval <minutes>` — How often scores decay *(default: 1440 min)*\n"
         "`!setDecayAmount <points>` — Points removed per decay tick *(default: 5)*\n\n"
         "👀 **PASSIVE MODERATION**\n"
@@ -354,6 +401,20 @@ async def set_decay_amount_cmd(ctx, amount: int = None):
         return
     set_decay_amount(str(ctx.guild.id), amount)
     await ctx.send(f"Decay amount updated — {amount} point(s) will be removed per decay tick.")
+
+
+@bot.command(name="setSensitivity")
+async def set_sensitivity_cmd(ctx, level: str = None):
+    if ctx.author.id != ctx.guild.owner_id:
+        await ctx.send("Only server owners can update sensitivity settings.")
+        return
+    if level not in ("low", "medium", "high"):
+        await ctx.send("Usage: `!setSensitivity <low|medium|high>`")
+        return
+    guild_id = str(ctx.guild.id)
+    set_guild_sensitivity(guild_id, level)
+    _sensitivity_cache[guild_id] = level
+    await ctx.send(f"Sensitivity updated to **{level}**. Stacy will now enforce policy at the **{level}** threshold.")
 
 
 @bot.command(name="history")

@@ -1,6 +1,6 @@
 USE stacy_hr_db;
 
-SELECT * FROM users;
+-- SELECT * FROM users;
 
 -- 1. See all Servers and their HR Constitutions
 SELECT * FROM guilds;
