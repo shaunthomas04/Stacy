@@ -256,6 +256,38 @@ workflow.add_edge("silent_ignore", END)
 app = workflow.compile()
 
 
+def get_forum_response(thread_name: str, conversation: str, directly_addressed: bool = False) -> str:
+    if directly_addressed:
+        cadence = (
+            "Someone has directly addressed you, so respond to what they said."
+        )
+    else:
+        cadence = (
+            "You are checking in after a few messages. Only say something if the conversation "
+            "needs steering, has gone off topic, or has reached a point worth acknowledging. "
+            "If things are progressing fine on their own, keep it brief — one sentence is enough."
+        )
+
+    system_prompt = (
+        f"You are Stacy from HR participating in a forum thread titled '{thread_name}'. "
+        "The conversation history includes an [Incident Report] entry at the top — that is the full context of what happened. "
+        "You already know what the violation was. Do NOT ask for more information about what happened. "
+        "Your role is to manage the conversation toward acknowledgement and resolution based on what you already know. "
+        "You are conversational and human — respond to what people actually say, not with generic questions. "
+        "You are not there to monologue; let people talk to each other. "
+        "If someone is defensive, stay patient but hold your ground. "
+        "If someone is cooperative or apologetic, be warmer and more constructive. "
+        "If things go off topic, redirect without making a scene. "
+        f"{cadence} "
+        "Keep responses to 1-3 sentences. Do not use any emojis."
+    )
+    response = llm.invoke([
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"Conversation so far:\n{conversation}"),
+    ])
+    return response.content
+
+
 if __name__ == "__main__":
     test_scenarios = [
         {

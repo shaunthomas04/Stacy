@@ -3,6 +3,7 @@ import asyncio
 import logging
 import threading
 import base64
+from collections import deque
 from dotenv import load_dotenv
 import discord
 from discord.ext import commands
@@ -14,7 +15,7 @@ import uvicorn
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # Import the compiled graph from your agent file
-from stacy_graph import app
+from stacy_graph import app, get_forum_response
 from database_functions import (
     upsert_user, initialize_guild, get_user_score,
     get_guild_policy, update_guild_policy,
@@ -94,6 +95,10 @@ DEFAULT_POLICY = (
 _guild_cache: dict[str, str] = {}
 # guild_id -> sensitivity string ('low', 'medium', 'high')
 _sensitivity_cache: dict[str, str] = {}
+# thread_id -> deque of (author_name, content) for forum thread context
+thread_buffers: dict[int, deque] = {}
+# thread_id -> messages since Stacy last responded
+thread_message_counts: dict[int, int] = {}
 
 
 def _ensure_guild(guild_id: str, guild_name: str) -> str:
@@ -152,12 +157,56 @@ async def _post_violation_thread(
             f"**Incident Report — {target_name}**\n\n"
             f"A severe policy violation has been escalated for formal review.\n\n"
             f"**Points Added:** {pts}\n"
-            f"**Violation:**\n> {violation_msg[:800]}\n\n"
-            f"*This thread was opened automatically by Stacy HR.*"
+            f"**Violation:**\n> {violation_msg[:800]}"
         )
-        await forum.create_thread(name=f"Incident — {target_name}", content=content)
+        result = await forum.create_thread(name=f"Incident — {target_name}", content=content)
+        thread_id = result.thread.id
+        thread_buffers[thread_id] = deque(maxlen=20)
+        thread_buffers[thread_id].append((
+            "[Incident Report]",
+            f"Violation by {target_name} ({pts} points): {violation_msg[:500]}"
+        ))
     except Exception as e:
         print(f"❌ Failed to create violation thread: {e}")
+
+
+def _forum_interval(thread_id: int) -> int:
+    """Returns how many messages Stacy waits before checking in unprompted.
+    Scales with unique participant count so she backs off as more people join the conversation.
+    Internal buffer entries (bracketed names like [Incident Report]) are excluded from the count."""
+    if thread_id not in thread_buffers:
+        return 1
+    unique = len({name for name, _ in thread_buffers[thread_id] if not name.startswith("[")})
+    return max(1, (unique - 1) * 3)
+
+
+async def _handle_forum_message(message: discord.Message):
+    thread_id = message.channel.id
+
+    if thread_id not in thread_buffers:
+        thread_buffers[thread_id] = deque(maxlen=20)
+    thread_buffers[thread_id].append((message.author.display_name, message.content or "[image]"))
+
+    directly_addressed = (
+        bot.user in message.mentions
+        or "stacy" in message.content.lower()
+    )
+
+    if not directly_addressed:
+        count = thread_message_counts.get(thread_id, 0) + 1
+        thread_message_counts[thread_id] = count
+        if count < _forum_interval(thread_id):
+            return
+        thread_message_counts[thread_id] = 0
+
+    context = "\n".join(f"{name}: {msg}" for name, msg in thread_buffers[thread_id])
+
+    async with message.channel.typing():
+        response = await asyncio.to_thread(
+            get_forum_response, message.channel.name, context, directly_addressed
+        )
+    if response:
+        await message.reply(response[:1990])
 
 
 async def run_stacy(
@@ -253,6 +302,13 @@ async def on_message(message):
         return
 
     await bot.process_commands(message)
+
+    # Forum thread: messages in policy-violations threads get dedicated context-aware handling
+    if isinstance(message.channel, discord.Thread):
+        parent = message.channel.parent
+        if isinstance(parent, discord.ForumChannel) and parent.name == "policy-violations":
+            await _handle_forum_message(message)
+            return
 
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
