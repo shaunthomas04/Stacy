@@ -10,6 +10,8 @@ class StacyState(TypedDict):
     user_id: str
     guild_id: str
     target_user_id: str
+    username: str
+    target_username: str
     hr_policy: str
     severity: str
     points: int

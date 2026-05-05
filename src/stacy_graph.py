@@ -15,15 +15,7 @@ if not os.getenv("OPENAI_API_KEY"):
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, timeout=10, max_retries=2)
 
 
-# 3. SEVERITY → DB ENUM MAP
-SEVERITY_MAP = {
-    "warning": "Low",
-    "minor":   "Medium",
-    "severe":  "Critical"
-}
-
-
-# 4. NODES
+# NODES
 
 def stacy_router(state: StacyState):
     hr_policy = state.get("hr_policy", "")
@@ -126,8 +118,10 @@ def report_node(state: StacyState):
 
 def apply_infraction_node(state: StacyState):
     sev = state.get("severity", "warning")
-    uid = state.get("user_id", "UnknownUser")           # who sent the message
-    target = state.get("target_user_id", uid)           # who actually gets the infraction
+    uid = state.get("user_id", "UnknownUser")
+    target = state.get("target_user_id", uid)
+    reporter_name = state.get("username", uid)
+    target_name = state.get("target_username", target)
     gid = state.get("guild_id", "UnknownGuild")
     pts = state.get("points", 0)
     last_msg = _text(state["messages"][-1]) or "[image only]"
@@ -150,8 +144,8 @@ def apply_infraction_node(state: StacyState):
 
     infraction_prompt = (
         f"You are Stacy, a strict but professional HR bot. You just {action_taken} "
-        f"against @{target}. Tell @{uid} (who {'reported this' if target != uid else 'did this'}) "
-        f"what happened and that {pts} points were added to @{target}'s record. "
+        f"against {target_name}. Tell {reporter_name} (who {'reported this' if target != uid else 'did this'}) "
+        f"what happened and that {pts} points were added to {target_name}'s record. "
         f"Use a {'gentle' if sev == 'warning' else 'stern'} tone. Include emojis."
     )
 

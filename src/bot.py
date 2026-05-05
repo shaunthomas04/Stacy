@@ -75,11 +75,11 @@ print(f"\n✅ Report server live at: {PUBLIC_URL}\n")
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, help_command=None)
 
 
 # ------------------
-# Constants
+# Constants & Cache
 # ------------------
 
 DEFAULT_POLICY = (
@@ -88,34 +88,42 @@ DEFAULT_POLICY = (
     "Repeated or severe violations will be escalated. Stacy is always watching."
 )
 
+# guild_id -> hr_policy string
+# Populated on first message from each guild, invalidated on !SetPolicy.
+# Eliminates 2 DB hits (initialize_guild + get_guild_policy) on every message.
+_guild_cache: dict[str, str] = {}
+
+
+def _ensure_guild(guild_id: str, guild_name: str) -> str:
+    """
+    Returns the guild's HR policy. On first call for a guild: writes the row to
+    DB if it doesn't exist, fetches the stored policy, and caches it.
+    Subsequent calls return the cached value with zero DB hits.
+    """
+    if guild_id not in _guild_cache:
+        initialize_guild(guild_id, guild_name, DEFAULT_POLICY)
+        _guild_cache[guild_id] = get_guild_policy(guild_id) or DEFAULT_POLICY
+    return _guild_cache[guild_id]
+
 
 # ------------------
 # Cron Job
 # ------------------
 
-async def role_sync_job():
-    """Runs every 5 minutes — syncs HR roles for all members in all guilds."""
-    print("⏰ Cron: Starting scheduled role sync...")
-    for guild in bot.guilds:
-        try:
-            initialize_guild(str(guild.id), guild.name, DEFAULT_POLICY)
-            await sync_all_roles(guild)
-        except Exception as e:
-            print(f"❌ Cron error for guild {guild.name}: {e}")
-    print("⏰ Cron: Role sync complete.")
-
-
-async def decay_job():
-    """Runs every minute — applies score decay to any guilds that are due."""
+async def decay_and_sync_job():
+    """
+    Runs every minute. For each guild: applies score decay if it's due,
+    then syncs Discord roles for any guild whose scores changed.
+    """
     decayed_ids = await asyncio.to_thread(decay_scores_due)
     if decayed_ids:
         print(f"⏰ Decay applied to guild(s): {decayed_ids}")
-        for guild in bot.guilds:
-            if str(guild.id) in decayed_ids:
-                try:
-                    await sync_all_roles(guild)
-                except Exception as e:
-                    print(f"❌ Role sync after decay failed for {guild.name}: {e}")
+    for guild in bot.guilds:
+        if str(guild.id) in decayed_ids:
+            try:
+                await sync_all_roles(guild)
+            except Exception as e:
+                print(f"❌ Role sync after decay failed for {guild.name}: {e}")
 
 
 # ------------------
@@ -128,6 +136,8 @@ async def run_stacy(
     target_user_id: str,
     message_content: str,
     hr_policy: str = "",
+    username: str = "",
+    target_username: str = "",
     image_b64: str = "",
     image_mime: str = "",
 ) -> str | None:
@@ -149,6 +159,8 @@ async def run_stacy(
         "guild_id": guild_id,
         "target_user_id": target_user_id,
         "hr_policy": hr_policy,
+        "username": username,
+        "target_username": target_username,
     }
 
     def _run():
@@ -174,13 +186,14 @@ async def on_ready():
 
     # Start the scheduler once the bot is ready and the event loop is running
     scheduler = AsyncIOScheduler()
-    scheduler.add_job(role_sync_job, "interval", minutes=5)
-    scheduler.add_job(decay_job, "interval", minutes=1)
+    scheduler.add_job(decay_and_sync_job, "interval", minutes=1)
     scheduler.start()
-    print("⏰ Schedulers started — role sync every 5 min, decay check every 1 min")
+    print("⏰ Scheduler started — decay + role sync check every 1 min")
 
-    # Run an immediate sync on startup so roles are correct right away
-    await role_sync_job()
+    # Warm cache, ensure all guilds exist in DB, and sync roles on startup
+    for guild in bot.guilds:
+        _ensure_guild(str(guild.id), guild.name)
+        await sync_all_roles(guild)
 
 
 @bot.event
@@ -193,8 +206,7 @@ async def on_message(message):
     guild_id = str(message.guild.id)
     user_id = str(message.author.id)
 
-    initialize_guild(guild_id, message.guild.name, DEFAULT_POLICY)
-    hr_policy = get_guild_policy(guild_id) or DEFAULT_POLICY
+    hr_policy = _ensure_guild(guild_id, message.guild.name)
 
     # Check for image attachments
     image_b64 = ""
@@ -226,7 +238,9 @@ async def on_message(message):
         async with message.channel.typing():
             response = await run_stacy(
                 user_id, guild_id, target_user_id,
-                message.content, hr_policy, image_b64, image_mime
+                message.content, hr_policy,
+                message.author.display_name, target_username,
+                image_b64, image_mime
             )
 
         if response:
@@ -246,7 +260,9 @@ async def on_message(message):
 
         response = await run_stacy(
             user_id, guild_id, user_id,
-            message.content, hr_policy, image_b64, image_mime
+            message.content, hr_policy,
+            message.author.display_name, message.author.display_name,
+            image_b64, image_mime
         )
 
         if response:
@@ -264,93 +280,83 @@ async def on_message(message):
 # Commands
 # ------------------
 
-@bot.command()
+@bot.command(name="ping")
 async def ping(ctx):
     await ctx.send("🏓 Pong!")
 
 
-@bot.command()
+@bot.command(name="hello")
 async def hello(ctx):
     await ctx.send(f"Hello {ctx.author.mention}, HR acknowledges your presence. 👔")
 
 
-@bot.command()
+@bot.command(name="rules")
 async def rules(ctx):
+    policy = get_guild_policy(str(ctx.guild.id)) or DEFAULT_POLICY
+    await ctx.send(f"**📋 {ctx.guild.name} HR Policy:**\n{policy}")
+
+
+@bot.command(name="stacyHelp")
+async def stacy_help(ctx):
     await ctx.send(
-        "**📋 HR Guidelines:**\n"
-        "1. Be respectful to all members\n"
-        "2. No harassment or hate speech\n"
-        "3. All memes must be HR-approved\n\n"
-        "To report a user: `@Stacy @offender your reason here`"
+        "⚖️  **STACY HR SYSTEM**  ⚖️\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        "📋 **GENERAL**\n"
+        "`!stacyHelp` — Show this menu\n"
+        "`!rules` — View this server's HR policy\n"
+        "`!history @user` — Pull up a user's HR report\n\n"
+        "🔒 **SERVER OWNER ONLY**\n"
+        "`!setPolicy <text>` — Update the server's HR rules\n"
+        "`!setDecayInterval <minutes>` — How often scores decay *(default: 1440 min)*\n"
+        "`!setDecayAmount <points>` — Points removed per decay tick *(default: 5)*\n\n"
+        "👀 **PASSIVE MODERATION**\n"
+        "Stacy reads every message and enforces server policy automatically.\n"
+        "`@Stacy <question>` — Ask Stacy about HR rules\n"
+        "`@Stacy @user <reason>` — Report a user to HR\n\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        "*Stacy is always watching.* 👁️"
     )
 
 
-@bot.command()
-async def helpme(ctx):
-    await ctx.send(
-        "**🤖 Stacy Commands:**\n"
-        "`!ping` – Test the bot\n"
-        "`!hello` – Greet HR\n"
-        "`!rules` – Read company rules\n"
-        "`!helpme` – List commands\n"
-        "`!History @user` – View a user's HR report\n\n"
-        "**Reporting a user:**\n"
-        "Mention `@Stacy` and then `@username` in the same message.\n"
-        "Example: `@Stacy @BadActor42 just used a slur in general`"
-    )
-
-
-@bot.command(name="SetPolicy")
+@bot.command(name="setPolicy")
 async def set_policy(ctx, *, policy: str = None):
-    """
-    Usage: !SetPolicy <new policy text>
-    Server owner only. Updates this server's HR policy in the database.
-    """
     if ctx.author.id != ctx.guild.owner_id:
         await ctx.send("Only server owners can update policy.")
         return
-
     if not policy:
-        await ctx.send("Usage: `!SetPolicy <policy text>`")
+        await ctx.send("Usage: `!setPolicy <policy text>`")
         return
-
-    update_guild_policy(str(ctx.guild.id), policy)
+    guild_id = str(ctx.guild.id)
+    update_guild_policy(guild_id, policy)
+    _guild_cache[guild_id] = policy
     await ctx.send("Policy has been updated!")
 
 
-@bot.command(name="SetDecayInterval")
+@bot.command(name="setDecayInterval")
 async def set_decay_interval_cmd(ctx, minutes: int = None):
-    """
-    Usage: !SetDecayInterval <minutes>
-    Server owner only. Sets how often score decay runs (default: 1440 = 24 hours).
-    """
     if ctx.author.id != ctx.guild.owner_id:
         await ctx.send("Only server owners can update decay settings.")
         return
     if minutes is None or minutes < 1:
-        await ctx.send("Usage: `!SetDecayInterval <minutes>` — e.g. `!SetDecayInterval 1440` for 24 hours.")
+        await ctx.send("Usage: `!setDecayInterval <minutes>` — e.g. `!setDecayInterval 1440` for 24 hours.")
         return
     set_decay_interval(str(ctx.guild.id), minutes)
     await ctx.send(f"Decay interval updated — scores will decay every {minutes} minute(s).")
 
 
-@bot.command(name="SetDecayAmount")
+@bot.command(name="setDecayAmount")
 async def set_decay_amount_cmd(ctx, amount: int = None):
-    """
-    Usage: !SetDecayAmount <points>
-    Server owner only. Sets how many points are removed per decay tick (default: 5).
-    """
     if ctx.author.id != ctx.guild.owner_id:
         await ctx.send("Only server owners can update decay settings.")
         return
     if amount is None or amount < 1:
-        await ctx.send("Usage: `!SetDecayAmount <points>` — e.g. `!SetDecayAmount 5`.")
+        await ctx.send("Usage: `!setDecayAmount <points>` — e.g. `!setDecayAmount 5`.")
         return
     set_decay_amount(str(ctx.guild.id), amount)
     await ctx.send(f"Decay amount updated — {amount} point(s) will be removed per decay tick.")
 
 
-@bot.command(name="History")
+@bot.command(name="history")
 async def hr_report(ctx, member: discord.Member = None):
     """
     Usage: !History @user
