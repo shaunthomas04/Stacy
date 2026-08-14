@@ -1,21 +1,47 @@
-import os
 import json
-from dotenv import load_dotenv
+import logging
+from typing import Literal
+
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, Field
+
+import config  # noqa: F401 — importing loads/validates env vars (incl. OPENAI_API_KEY) once
 from stacy_graph_tools import StacyState, lookup_hr_policy, warn_user, upload_minor_infraction, upload_severe_infraction
 
-# 1. LOAD ENVIRONMENT
-load_dotenv()
-if not os.getenv("OPENAI_API_KEY"):
-    print("Warning: OPENAI_API_KEY not found in .env file")
+logger = logging.getLogger(__name__)
 
-# 2. INITIALIZE LLM ONCE (Global)
+# INITIALIZE LLM ONCE (Global)
 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, timeout=10, max_retries=2)
 
 
-# NODES
+def _safe_invoke(messages: list, fallback: str) -> str:
+    """Invokes the LLM and returns its text, or `fallback` if the call fails
+    (timeout, API error, etc.) so a bad request never leaves the user with silence."""
+    try:
+        return llm.invoke(messages).content
+    except Exception as e:
+        logger.error(f"Stacy LLM call failed: {e}")
+        return fallback
+
+
+def _text(msg) -> str:
+    c = msg.content
+    if isinstance(c, list):
+        return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+    return c
+
+
+# ROUTER
+
+class RouterDecision(BaseModel):
+    action: Literal["ignore", "hr_question", "report_violation"] = Field(
+        description="How to handle the most recent message."
+    )
+
+
+_router_llm = llm.with_structured_output(RouterDecision)
 
 _ROUTER_PROMPTS = {
     "low": (
@@ -54,33 +80,18 @@ def stacy_router(state: StacyState):
     rules = _ROUTER_PROMPTS.get(sensitivity, _ROUTER_PROMPTS["low"])
 
     system_prompt = (
-        f"You are an HR routing system. Analyze the message and return ONLY ONE WORD.\n"
-        f"Keywords: 'ignore', 'hr_question', 'report_violation'.{policy_block}\n\n"
-        f"{rules}"
+        f"You are an HR routing system. Decide how to handle the most recent message.{policy_block}\n\n{rules}"
     )
 
     try:
-        response = llm.invoke([SystemMessage(content=system_prompt)] + state["messages"])
-        content = response.content.lower().strip()
-
-        if "hr_question" in content:
-            return "hr_question"
-        elif "report" in content or "violation" in content or "slur" in content:
-            return "report_violation"
-        else:
-            return "ignore"
-
+        decision = _router_llm.invoke([SystemMessage(content=system_prompt)] + state["messages"])
+        return decision.action
     except Exception as e:
-        print(f"!!! Stacy Router Error (Timeout or API Issue): {e}")
+        logger.error(f"Stacy router error (timeout or API issue): {e}")
         return "ignore"
 
 
-def _text(msg) -> str:
-    c = msg.content
-    if isinstance(c, list):
-        return " ".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
-    return c
-
+# HR QUESTIONS
 
 def hr_node(state: StacyState):
     policy_text = lookup_hr_policy.invoke({
@@ -102,126 +113,104 @@ def hr_node(state: StacyState):
         HumanMessage(content=f"Relevant policy: {policy_text}")
     ]
 
-    response = llm.invoke(prompt)
-    return {"messages": [response]}
+    content = _safe_invoke(
+        prompt,
+        "Sorry — I'm having a little trouble pulling that up right now. Can you try asking again in a moment?"
+    )
+    return {"messages": [AIMessage(content=content)]}
 
 
-def report_node(state: StacyState):
-    last_msg = _text(state["messages"][-1]) or "[image]"
+# VIOLATIONS — one LLM call classifies severity AND writes Stacy's reply,
+# instead of two sequential calls. The DB write itself needs no LLM at all.
+
+class InfractionAssessment(BaseModel):
+    severity: Literal["warning", "minor", "severe"] = Field(
+        description="warning = borderline/first-offense (0 points); "
+                     "minor = clear violation (1-3 points); "
+                     "severe = hate speech/threats/serious harassment (4-10 points)"
+    )
+    points: int = Field(ge=0, le=10, description="Points to add. Must be 0 for 'warning'.")
+    violator: str = Field(
+        default="",
+        description="Exact display name of the violating participant. Only set in batch/conversation mode."
+    )
+    message: str = Field(description="Stacy's in-character reply to post, matching the chosen severity's tone.")
+
+
+_infraction_llm = llm.with_structured_output(InfractionAssessment)
+
+_FALLBACK_INFRACTION_MESSAGE = (
+    "I flagged something here but I'm having trouble putting it into words right now — it's on record, "
+    "we'll sort the details out later."
+)
+
+
+def report_and_reply_node(state: StacyState):
     hr_policy = state.get("hr_policy", "")
     participants = state.get("participants") or {}
     is_batch = bool(participants)
-
     policy_block = f"\n\nThis server's HR policy:\n{hr_policy}" if hr_policy else ""
 
     if is_batch:
         names = ", ".join(participants.keys())
-        format_example = f'{{"severity": "warning", "points": 0, "violator": "<one of: {names}>"}}'
-        context = (
-            "You are reviewing a conversation log. Identify which participant (if any) "
-            "violated policy and include their exact display name in the 'violator' field."
+        context = "You are reviewing a conversation log."
+        batch_instructions = (
+            f"\n\nIdentify which participant (if any) violated policy and put their exact display "
+            f"name in the 'violator' field (one of: {names}). Address them by name in your reply if relevant."
         )
     else:
-        format_example = '{"severity": "warning", "points": 0}'
         context = "You are reviewing a single message."
+        batch_instructions = ""
 
     system_prompt = f"""You are Stacy, an HR enforcement bot. {context}{policy_block}
 
-    Return ONLY a JSON object: {format_example}
+First decide the severity, then write Stacy's in-character reply to match it:
 
-    Rules — be CONSERVATIVE:
-    - "warning" (0 points): Borderline content, mild directed insults, first offense tone
-    - "minor" (1-3 points): Clear policy violations, repeated targeted rudeness, low-grade slurs
-    - "severe" (4-10 points): Explicit hate speech, slurs, threats, serious harassment
+- "warning" (0 points): borderline content, mild directed insults, first-offense tone.
+  Reply as Stacy: sincere, a little anxious, not trying to be heavy-handed but can't quite let it go either. She cares about consistency, not punishment. Speak like a real person, not a policy document. 2 sentences.
+- "minor" (1-3 points): clear policy violations, repeated targeted rudeness, low-grade slurs.
+  Reply as Stacy: a little apologetic, she genuinely believes in the rules but isn't enjoying this part. Direct but not cold. Mention the point total somewhere naturally. 2-3 sentences.
+- "severe" (4-10 points): explicit hate speech, slurs, threats, serious harassment.
+  Reply as Stacy: genuinely uncomfortable having had to do this, but clear and direct because the situation calls for it. Not robotic or cold. Mention the points somewhere naturally. 3 sentences.
 
-    Consider conversation context — escalating patterns are more severe than isolated messages.
-    If the content violates a specific server HR rule, treat it as at least "minor".
-    Default to "warning" if unsure. Return ONLY the JSON, no explanation."""
+Be CONSERVATIVE. Default to "warning" if unsure. If the content violates a specific server HR rule, treat it as at least "minor". Consider conversation context — escalating patterns are more severe than isolated messages.{batch_instructions}
 
-    response = llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Content to evaluate:\n{last_msg}")
-    ])
+Vary your wording — don't repeat the same structure every time. Do not use any emojis. Do NOT write an email subject line or sign-off — just the reply body."""
 
     try:
-        clean = response.content.strip().strip("```json").strip("```").strip()
-        result = json.loads(clean)
-        severity = result.get("severity", "warning")
-        points = int(result.get("points", 0))
-        violator_name = result.get("violator", "")
-    except (json.JSONDecodeError, ValueError):
-        severity = "warning"
-        points = 0
-        violator_name = ""
+        assessment = _infraction_llm.invoke([SystemMessage(content=system_prompt)] + state["messages"])
+        severity = assessment.severity
+        points = assessment.points if severity != "warning" else 0
+        violator_name = assessment.violator if is_batch else ""
+        reply_text = assessment.message
+    except Exception as e:
+        logger.error(f"Stacy report/reply error: {e}")
+        severity, points, violator_name = "warning", 0, ""
+        reply_text = _FALLBACK_INFRACTION_MESSAGE
 
-    return {"severity": severity, "points": points, "violator_name": violator_name}
-
-
-def apply_infraction_node(state: StacyState):
-    sev = state.get("severity", "warning")
     uid = state.get("user_id", "UnknownUser")
     gid = state.get("guild_id", "UnknownGuild")
-    pts = state.get("points", 0)
     last_msg = _text(state["messages"][-1]) or "[image only]"
-
-    participants = state.get("participants") or {}
-    violator_name = state.get("violator_name", "")
 
     # Batch mode: resolve the violating user from the participants map
     if participants and violator_name and violator_name in participants:
         target = participants[violator_name]
-        target_name = violator_name
-        reporter_name = "the server"
     else:
         target = state.get("target_user_id", uid)
-        target_name = state.get("target_username", target)
-        reporter_name = state.get("username", uid)
 
-    if sev == "warning":
-        action_taken = "issued a formal warning (0 points)"
-        tool_result = warn_user.invoke({
-            "user_id": target, "guild_id": gid, "message": last_msg
-        })
-    elif sev == "minor":
-        action_taken = f"recorded a Minor Infraction ({pts} points)"
-        tool_result = upload_minor_infraction.invoke({
-            "user_id": target, "guild_id": gid, "message": last_msg, "points": pts
-        })
+    if severity == "warning":
+        warn_user.invoke({"user_id": target, "guild_id": gid, "message": last_msg})
+    elif severity == "minor":
+        upload_minor_infraction.invoke({"user_id": target, "guild_id": gid, "message": last_msg, "points": points})
     else:
-        action_taken = f"recorded a Severe Infraction ({pts} points) and opened a forum investigation"
-        tool_result = upload_severe_infraction.invoke({
-            "user_id": target, "guild_id": gid, "message": last_msg, "points": pts
-        })
+        upload_severe_infraction.invoke({"user_id": target, "guild_id": gid, "message": last_msg, "points": points})
 
-    if sev == "warning":
-        infraction_prompt = (
-            f"You are Stacy from HR. You flagged something in {target_name}'s message — no points, just a note. "
-            f"Personality: sincere, a little anxious, not trying to be heavy-handed but can't quite let it go either. "
-            f"You care about consistency, not punishment. You speak like a real person, not a policy document. "
-            f"Keep it to 2 sentences. Vary your wording — don't repeat the same structure every time. Do not use any emojis. "
-            f"Do NOT write an email subject line or sign-off — just the message body."
-        )
-    elif sev == "minor":
-        infraction_prompt = (
-            f"You are Stacy from HR. You logged a Minor Infraction against {target_name} — {pts} point(s) added to their record. "
-            f"Personality: you're a little apologetic, you genuinely believe in the rules but you're not enjoying this part. "
-            f"You're direct but not cold — you speak like a real person, not a policy document. "
-            f"Mention the {pts} point(s) somewhere naturally. Keep it to 2-3 sentences. "
-            f"Vary your wording — don't repeat the same structure every time. Do not use any emojis. "
-            f"Do NOT write an email subject line or sign-off — just the message body."
-        )
-    else:
-        infraction_prompt = (
-            f"You are Stacy from HR. You escalated a Severe Infraction against {target_name} — {pts} points added. "
-            f"Personality: genuinely uncomfortable having had to do this, but clear and direct because the situation calls for it. "
-            f"You're not robotic or cold — you speak like a real person who takes this seriously. "
-            f"Mention the {pts} points somewhere naturally. Keep it to 3 sentences. "
-            f"Vary your wording — don't repeat the same structure every time. Do not use any emojis. "
-            f"Do NOT write an email subject line or sign-off — just the message body."
-        )
-
-    response = llm.invoke([SystemMessage(content=infraction_prompt)] + state["messages"])
-    return {"messages": [response]}
+    return {
+        "severity": severity,
+        "points": points,
+        "violator_name": violator_name,
+        "messages": [AIMessage(content=reply_text)],
+    }
 
 
 def silent_ignore_node(state: StacyState):
@@ -229,13 +218,12 @@ def silent_ignore_node(state: StacyState):
     return {"messages": [HumanMessage(content="[Stacy has no response for this message]", name="Stacy")]}
 
 
-# 5. GRAPH CONSTRUCTION
+# GRAPH CONSTRUCTION
 
 workflow = StateGraph(StacyState)
 
 workflow.add_node("process_hr", hr_node)
-workflow.add_node("process_report", report_node)
-workflow.add_node("apply_infraction", apply_infraction_node)
+workflow.add_node("process_report", report_and_reply_node)
 workflow.add_node("silent_ignore", silent_ignore_node)
 
 workflow.add_conditional_edges(
@@ -248,13 +236,14 @@ workflow.add_conditional_edges(
     }
 )
 
-workflow.add_edge("process_report", "apply_infraction")
 workflow.add_edge("process_hr", END)
-workflow.add_edge("apply_infraction", END)
+workflow.add_edge("process_report", END)
 workflow.add_edge("silent_ignore", END)
 
 app = workflow.compile()
 
+
+# STANDALONE LLM HELPERS (appeals, pardons, resolutions, forum participation)
 
 def get_appeal_decision(
     username: str,
@@ -285,21 +274,23 @@ Rules:
 - The message must be in Stacy's voice — earnest HR person, reacts to what they actually said
 - 2-3 sentences, no emojis, no sign-off"""
 
-    response = llm.invoke([SystemMessage(content=system_prompt)])
+    default = {
+        "decision": "upheld",
+        "points_removed": 0,
+        "message": "Your appeal has been reviewed and the original infraction will stand.",
+    }
     try:
+        response = llm.invoke([SystemMessage(content=system_prompt)])
         clean = response.content.strip().strip("```json").strip("```").strip()
         result = json.loads(clean)
         return {
             "decision": result.get("decision", "upheld"),
             "points_removed": int(result.get("points_removed", 0)),
-            "message": result.get("message", "Your appeal has been reviewed and the original infraction will stand."),
+            "message": result.get("message", default["message"]),
         }
-    except (json.JSONDecodeError, ValueError):
-        return {
-            "decision": "upheld",
-            "points_removed": 0,
-            "message": "Your appeal has been reviewed and the original infraction will stand.",
-        }
+    except Exception as e:
+        logger.error(f"Stacy appeal decision error: {e}")
+        return default
 
 
 def get_pardon_response(member_name: str) -> str:
@@ -312,8 +303,10 @@ def get_pardon_response(member_name: str) -> str:
         "Keep it to 2-3 sentences. Do not use any emojis. "
         "Do NOT write an email subject line or sign-off — just the message body."
     )
-    response = llm.invoke([SystemMessage(content=system_prompt)])
-    return response.content
+    return _safe_invoke(
+        [SystemMessage(content=system_prompt)],
+        f"{member_name}'s record has been cleared and their standing reset, for the record."
+    )
 
 
 def get_resolve_response(thread_name: str) -> str:
@@ -326,8 +319,7 @@ def get_resolve_response(thread_name: str) -> str:
         "Keep it to 2 sentences. Do not use any emojis. "
         "Do NOT write an email subject line or sign-off — just the message body."
     )
-    response = llm.invoke([SystemMessage(content=system_prompt)])
-    return response.content
+    return _safe_invoke([SystemMessage(content=system_prompt)], "This matter is now closed.")
 
 
 def get_forum_response(thread_name: str, conversation: str, directly_addressed: bool = False) -> str:
@@ -355,11 +347,12 @@ def get_forum_response(thread_name: str, conversation: str, directly_addressed: 
         f"{cadence} "
         "Keep responses to 1-3 sentences. Do not use any emojis."
     )
-    response = llm.invoke([
-        SystemMessage(content=system_prompt),
-        HumanMessage(content=f"Conversation so far:\n{conversation}"),
-    ])
-    return response.content
+    # Empty fallback is intentional: handle_forum_message() only replies if response is truthy,
+    # so a failed call here just means Stacy stays quiet in the thread instead of erroring out.
+    return _safe_invoke(
+        [SystemMessage(content=system_prompt), HumanMessage(content=f"Conversation so far:\n{conversation}")],
+        ""
+    )
 
 
 if __name__ == "__main__":
@@ -401,7 +394,7 @@ if __name__ == "__main__":
         }
     ]
 
-    print("🚀 STARTING STACY AGENT TEST SUITE\n" + "="*40)
+    print("STARTING STACY AGENT TEST SUITE\n" + "="*40)
 
     for i, scenario in enumerate(test_scenarios, 1):
         print(f"\nRUNNING {scenario['name']}")

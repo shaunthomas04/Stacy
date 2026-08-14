@@ -1,0 +1,45 @@
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-stacy_dev_password}
+      MYSQL_DATABASE: ${DB_NAME:-stacy_hr_db}
+    ports:
+      - "3306:3306"
+    volumes:
+      # Named volume — survives `docker compose down` and rebuilds.
+      # Only `docker compose down -v` wipes it.
+      - mysql_data:/var/lib/mysql
+      # Auto-loads the schema on first boot only (empty data dir).
+      # Changing stacy_hr_db.sql after that requires a manual migration
+      # or `docker compose down -v` to force a clean re-init.
+      - ./stacy_hr_db.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${DB_PASSWORD:-stacy_dev_password}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever DB_HOST/DB_PORT/DB_USER are in .env — inside
+      # the compose network the DB is reachable at the service name, not
+      # localhost, and always authenticates as root against the mysql
+      # service above.
+      DB_HOST: mysql
+      DB_PORT: 3306
+      DB_USER: root
+    depends_on:
+      mysql:
+        condition: service_healthy
+    volumes:
+      # Generated HTML reports persist on the host and survive restarts.
+      - ./src/temp:/app/src/temp
+
+volumes:
+  mysql_data:

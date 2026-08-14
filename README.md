@@ -42,49 +42,54 @@ Stacy is a satirical HR enforcement bot for Discord servers. She passively monit
 
 ## Setup
 
-### Prerequisites
-- Python 3.10+
-- MySQL 8.x
+### Prerequisites (either path)
 - OpenAI API key
 - Discord bot token
 - ngrok auth token (free tier works)
 
-### 1. Clone and set up a virtual environment
+### 1. Clone and configure `.env`
 ```bash
 git clone https://github.com/shaunthomas04/Stacy-From-Human-Resources.git
 cd Stacy
+cp .env.example .env
+```
+Fill in `DISCORD_TOKEN`, `OPENAI_API_KEY`, and `NGROK_AUTHTOKEN`. Leave the `DB_*` values as-is unless you have a reason to change them — see `.env.example` for what each one does.
+
+Then pick one of the two paths below.
+
+---
+
+### Path A — Docker (recommended: zero local MySQL/Python setup)
+Requires only Docker and Docker Compose.
+```bash
+docker compose up -d
+```
+This builds the bot image, starts MySQL, auto-loads `stacy_hr_db.sql` on first boot, waits for the DB to be healthy, then starts the bot. Watch logs with:
+```bash
+docker compose logs -f bot
+```
+DB data lives in a named volume and survives `docker compose down` / rebuilds — only `docker compose down -v` wipes it. To pick up code changes, rebuild the bot image:
+```bash
+docker compose up -d --build bot
+```
+
+### Path B — Native (venv + local MySQL, best for active development)
+- Python 3.10+
+- MySQL 8.x running locally
+
+```bash
 python -m venv venv
-
-# Windows
-venv\Scripts\activate
-# macOS/Linux
-source venv/bin/activate
-```
-
-### 2. Install dependencies
-```bash
+source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-```
-
-### 3. Set up the database
-```bash
 mysql -u root -p < stacy_hr_db.sql
-```
-
-### 4. Create a `.env` file in the project root
-```env
-DISCORD_TOKEN=your_discord_bot_token
-OPENAI_API_KEY=your_openai_api_key
-NGROK_AUTHTOKEN=your_ngrok_auth_token
-```
-
-### 5. Run
-```bash
 cd src
 python bot.py
 ```
+Faster iteration than Docker — no image rebuild between code changes, just restart `python bot.py`.
 
-Stacy prints the ngrok report URL on startup. Keep the terminal open while the bot is running.
+---
+
+Stacy prints the ngrok report URL on startup either way.
 
 ### Invite Stacy to your server
 ```

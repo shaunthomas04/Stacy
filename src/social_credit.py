@@ -1,7 +1,9 @@
+import logging
+
 import discord
-import os
-from dotenv import load_dotenv
 from database_functions import get_user_score, upsert_user
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------
 # CONFIG
@@ -47,7 +49,7 @@ async def get_or_create_role(
         color=ROLE_COLORS.get(role_name, discord.Color.default()),
         reason="Stacy HR role auto-created"
     )
-    print(f"  Created new role: {role_name} in {guild.name}")
+    logger.info(f"Created new role: {role_name} in {guild.name}")
     return new_role
 
 
@@ -66,7 +68,7 @@ async def assign_hr_role(
 
     role = await get_or_create_role(guild, correct_role_name, fetched_roles)
     await member.add_roles(role, reason=f"Stacy HR: score={score}")
-    print(f"  ✅ {member.display_name} → '{correct_role_name}' (score: {score})")
+    logger.info(f"{member.display_name} -> '{correct_role_name}' (score: {score})")
 
 
 async def sync_all_roles(guild: discord.Guild):
@@ -74,7 +76,7 @@ async def sync_all_roles(guild: discord.Guild):
     Goes through every member in the guild, pulls their score from the DB,
     and assigns the correct HR role. Safe to call from a cron job.
     """
-    print(f"\n🔄 Starting HR role sync for {guild.name}...")
+    logger.info(f"Starting HR role sync for {guild.name}...")
 
     # Ensure all HR roles exist up front
     fetched_roles = await guild.fetch_roles()
@@ -97,7 +99,7 @@ async def sync_all_roles(guild: discord.Guild):
         await assign_hr_role(guild, member, score, fetched_roles)
         synced += 1
 
-    print(f"✅ Sync complete — {synced} members updated, {skipped} bots skipped\n")
+    logger.info(f"Sync complete — {synced} members updated, {skipped} bots skipped")
 
 
 async def setup_and_assign_hr_role(
@@ -111,34 +113,3 @@ async def setup_and_assign_hr_role(
         await get_or_create_role(guild, role_name, fetched_roles)
     fetched_roles = await guild.fetch_roles()
     await assign_hr_role(guild, member, score, fetched_roles)
-
-
-# ---------------------------
-# MAIN — runs the full guild sync
-# ---------------------------
-
-load_dotenv()
-TOKEN    = os.getenv("DISCORD_TOKEN")
-GUILD_ID = int(os.getenv("GUILD_ID"))
-USER_ID  = int(os.getenv("USER_ID"))
-
-if __name__ == "__main__":
-    import asyncio
-
-    async def run_sync():
-        intents = discord.Intents.default()
-        intents.members = True
-        client = discord.Client(intents=intents)
-
-        @client.event
-        async def on_ready():
-            print(f"Logged in as {client.user}")
-
-            guild = await client.fetch_guild(GUILD_ID)
-            await sync_all_roles(guild)
-
-            await client.close()
-
-        await client.start(TOKEN)
-
-    asyncio.run(run_sync())

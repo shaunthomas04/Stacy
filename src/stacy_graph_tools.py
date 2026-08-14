@@ -2,7 +2,7 @@ from typing import Annotated, TypedDict
 from langchain_core.messages import BaseMessage
 from langchain_core.tools import tool
 from langgraph.graph import add_messages
-from database_functions import log_stacy_inference, upsert_user, get_connection
+from database_functions import log_stacy_inference, get_cursor
 
 # 3. STATE DEFINITION
 class StacyState(TypedDict):
@@ -17,25 +17,19 @@ class StacyState(TypedDict):
     severity: str
     points: int
     participants: dict   # display_name -> user_id, set for batch/conversation messages
-    violator_name: str   # filled by report_node when processing a batch
+    violator_name: str   # filled by report_and_reply_node when processing a batch
 
 # 4. TOOLS
 @tool
 def lookup_hr_policy(guild_id: str, user_question: str) -> str:
     """Look up this Discord server's HR policy to answer user questions."""
-    conn = get_connection()
-    if not conn:
-        return "HR policy unavailable at this time."
-    cursor = conn.cursor()
-    try:
-        cursor.execute("SELECT hr_policy_text FROM guilds WHERE guild_id = %s", (guild_id,))
-        row = cursor.fetchone()
-        return row[0] if row else "No HR policy has been configured for this server."
-    except Exception as e:
-        return f"Error fetching HR policy: {e}"
-    finally:
-        cursor.close()
-        conn.close()
+    policy = "HR policy unavailable at this time."
+    with get_cursor() as cursor:
+        if cursor:
+            cursor.execute("SELECT hr_policy_text FROM guilds WHERE guild_id = %s", (guild_id,))
+            row = cursor.fetchone()
+            policy = row[0] if row else "No HR policy has been configured for this server."
+    return policy
 
 @tool
 def warn_user(user_id: str, guild_id: str, message: str) -> str:
